@@ -1,5 +1,5 @@
 // index.js
-const app = require('./app');
+const app = require('./app.module');
 
 const PORT = 3000;
 app.listen(PORT, () => {

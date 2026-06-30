@@ -1,6 +1,6 @@
 // app.js
 import express from 'express';
-import eventScheduleRouter from './src/modules/Event Schedule/api/routes/event.routes.js'; 
+import eventScheduleRouter from './modules/Event Schedule/api/routes/event.routes.js'; 
 
 const app = express();
 app.use(express.json());

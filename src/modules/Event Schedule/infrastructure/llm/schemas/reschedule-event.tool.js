@@ -2,8 +2,6 @@ import { z } from 'zod';
 
 /**
  * Tool definition for rescheduling an existing conference event/talk.
- * Handles time changes, room changes, or both. Runs conflict checks atomically.
- * Requires organizer/admin role on the parent conference.
  */
 export const rescheduleEventToolDef = {
   name: 'reschedule_event',
@@ -19,7 +17,6 @@ export const rescheduleEventToolDef = {
     event_id: z.string().uuid()
       .describe('Required. Event UUID to reschedule.'),
     
-    // At least one field to change
     start_time: z.string()
       .datetime({ offset: false, message: 'Must be UTC with Z suffix' })
       .optional()
@@ -48,7 +45,6 @@ export const rescheduleEventToolDef = {
     const hasTimeChange = data.start_time || data.end_time;
     const hasRoomChange = data.room_id !== undefined;
     
-    // 1. Must change something
     if (!hasTimeChange && !hasRoomChange) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -57,7 +53,6 @@ export const rescheduleEventToolDef = {
       });
     }
     
-    // 2. If changing time, both start+end required
     if (data.start_time && !data.end_time) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -73,7 +68,6 @@ export const rescheduleEventToolDef = {
       });
     }
     
-    // 3. Time validation if present
     if (data.start_time && data.end_time) {
       const start = new Date(data.start_time);
       const end = new Date(data.end_time);
@@ -102,7 +96,6 @@ export const rescheduleEventToolDef = {
         });
       }
       
-      // Max duration check
       const durationMs = end.getTime() - start.getTime();
       if (durationMs > 12 * 60 * 60 * 1000) {
         ctx.addIssue({
@@ -115,14 +108,14 @@ export const rescheduleEventToolDef = {
   }),
 
   // Operational Metadata
-  requiresRole: ['organizer', 'admin'], // Attendees cannot reschedule
+  requiresRole: ['organizer', 'admin'], // 👈 Removed 'as const'
   featureFlag: 'llm_reschedule_event_enabled',
-  costCents: 5, // Write + conflict check + outbox + notifications
-  slaMs: 2000,  // DB transaction + row locks
+  costCents: 5,
+  slaMs: 2000,
   useCase: 'rescheduleEvent',
   rateLimit: {
-    perUserPerMin: 10, // Prevent spam reschedules
-    perEventPerMin: 3  // Prevent race conditions on same event
+    perUserPerMin: 10,
+    perEventPerMin: 3
   },
   
   responseContract: {
@@ -133,9 +126,9 @@ export const rescheduleEventToolDef = {
       new_start_time: { type: 'string' },
       old_room_id: { type: 'string | null' },
       new_room_id: { type: 'string | null' },
-      conflict_warnings: { type: 'string[]' } // e.g. "Speaker now has 10min gap"
+      conflict_warnings: { type: 'string[]' }
     }
   }
-} as const;
+}; // 👈 Removed 'as const'
 
-export type RescheduleEventInput = z.infer<typeof rescheduleEventToolDef.zodSchema>;
+// 👈 Removed the 'export type RescheduleEventInput' completely since types don't exist in JavaScript!
