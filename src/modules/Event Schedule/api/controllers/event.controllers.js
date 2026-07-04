@@ -1,10 +1,10 @@
 // Corrected paths (up 3 levels) and added ListEventsUseCase import
 // event.controllers.js
-import { CreateEventUseCase } from "../../application/create-event.usecase.js";
-import { GetEventByIdUseCase } from "../../application/get-event.usecase.js"; 
-import { RescheduleEventUseCase } from "../../application/reschedule-event.usecase.js";
-import { CancelEventUseCase } from "../../application/cancel-event.usecase.js";
-import { ListEventUseCase } from "../../application/list-event.usecase.js";
+import { CreateEventUseCase } from "../../application/use-case/create-event.usecase.js";
+import { GetEventByIdUseCase } from "../../application/use-case/get-event.usecase.js"; 
+import { RescheduleEventUseCase } from "../../application/use-case/reschedule-event.usecase.js";
+import { CancelEventUseCase } from "../../application/use-case/cancel-event.usecase.js";
+import { ListEventUseCase } from "../../application/use-case/list-event.usecase.js";
 
 export class EventController {   
     static async createEvent(req, res, next) {
