@@ -22,3 +22,4 @@ export function createNotificationRouter(notificationController) {
 
   return router;
 }
+

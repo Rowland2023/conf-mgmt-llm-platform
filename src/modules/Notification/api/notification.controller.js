@@ -8,6 +8,14 @@ export class NotificationController {
     listNotificationsUseCase,
     getNotificationUseCase
   }) {
+    if (!sendEmailUseCase) throw new Error('sendEmailUseCase is required');
+    if (!sendSMSUseCase) throw new Error('sendSMSUseCase is required');
+    if (!sendPushNotificationUseCase) throw new Error('sendPushNotificationUseCase is required');
+    if (!updateNotificationUseCase) throw new Error('updateNotificationUseCase is required');
+    if (!deleteNotificationUseCase) throw new Error('deleteNotificationUseCase is required');
+    if (!listNotificationsUseCase) throw new Error('listNotificationsUseCase is required');
+    if (!getNotificationUseCase) throw new Error('getNotificationUseCase is required');
+
     this.sendEmailUseCase = sendEmailUseCase;
     this.sendSMSUseCase = sendSMSUseCase;
     this.sendPushNotificationUseCase = sendPushNotificationUseCase;
@@ -15,18 +23,22 @@ export class NotificationController {
     this.deleteNotificationUseCase = deleteNotificationUseCase;
     this.listNotificationsUseCase = listNotificationsUseCase;
     this.getNotificationUseCase = getNotificationUseCase;
+
+    this.list = this.list.bind(this);
+    this.get = this.get.bind(this);
+    this.sendEmail = this.sendEmail.bind(this);
+    this.sendSMS = this.sendSMS.bind(this);
+    this.sendPush = this.sendPush.bind(this);
+    this.update = this.update.bind(this);
+    this.delete = this.delete.bind(this);
   }
 
-  /**
-   * Fetch a history/list of notifications for an attendee, speaker, or organizer.
-   * GET /notifications
-   */
   async list(req, res, next) {
     try {
       const result = await this.listNotificationsUseCase.execute({
-        tenantId: req.user?.tenantId, // Separates different conferences or organizer organizations
+        tenantId: req.user?.tenantId,
         userId: req.user?.id,
-        ...req.query                  // Supports filtering by status (read/unread) or pagination
+        ...req.query
       });
 
       return res.status(200).json(result);
@@ -35,10 +47,6 @@ export class NotificationController {
     }
   }
 
-  /**
-   * Fetch details of a specific notification log.
-   * GET /notifications/:id
-   */
   async get(req, res, next) {
     try {
       const result = await this.getNotificationUseCase.execute({
@@ -52,17 +60,13 @@ export class NotificationController {
     }
   }
 
-  /**
-   * Trigger an email notification (e.g., Ticket Purchase Invoices, Speaker Invites).
-   * POST /notifications/email
-   */
   async sendEmail(req, res, next) {
     try {
       const result = await this.sendEmailUseCase.execute({
         ...req.body,
         requestedBy: req.user?.id,
         tenantId: req.user?.tenantId,
-        idempotencyKey: req.headers["idempotency-key"] // Prevents duplicate ticket emails on unstable connections
+        idempotencyKey: req.headers['idempotency-key']
       });
 
       return res.status(202).json(result);
@@ -71,17 +75,13 @@ export class NotificationController {
     }
   }
 
-  /**
-   * Trigger an SMS notification (e.g., Critical Schedule Changes, Urgent Venue Alterations).
-   * POST /notifications/sms
-   */
   async sendSMS(req, res, next) {
     try {
       const result = await this.sendSMSUseCase.execute({
         ...req.body,
         requestedBy: req.user?.id,
         tenantId: req.user?.tenantId,
-        idempotencyKey: req.headers["idempotency-key"]
+        idempotencyKey: req.headers['idempotency-key']
       });
 
       return res.status(202).json(result);
@@ -90,17 +90,13 @@ export class NotificationController {
     }
   }
 
-  /**
-   * Trigger a push notification to mobile apps (e.g., "Session starting in 10 mins").
-   * POST /notifications/push
-   */
   async sendPush(req, res, next) {
     try {
       const result = await this.sendPushNotificationUseCase.execute({
         ...req.body,
         requestedBy: req.user?.id,
         tenantId: req.user?.tenantId,
-        idempotencyKey: req.headers["idempotency-key"]
+        idempotencyKey: req.headers['idempotency-key']
       });
 
       return res.status(202).json(result);
@@ -109,10 +105,6 @@ export class NotificationController {
     }
   }
 
-  /**
-   * Update a notification status (e.g., an attendee marking an in-app alert as 'READ').
-   * PUT /notifications/:id
-   */
   async update(req, res, next) {
     try {
       const result = await this.updateNotificationUseCase.execute({
@@ -128,10 +120,6 @@ export class NotificationController {
     }
   }
 
-  /**
-   * Soft-delete or clear a notification from an attendee's view.
-   * DELETE /notifications/:id
-   */
   async delete(req, res, next) {
     try {
       await this.deleteNotificationUseCase.execute({
