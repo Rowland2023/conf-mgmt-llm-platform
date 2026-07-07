@@ -1,11 +1,11 @@
 // src/modules/Payment/api/payment.route.js
 
-import { authGuard } from '../../../shared/middleware/authGuard.js';
-import { validate } from '../../../shared/middleware/validate.js';
-import { webhookRawBody } from '../../../shared/middleware/webhookRawBody.js';
-import { rateLimit } from '../../../shared/middleware/rateLimit.js';
-import { ipAllowlist } from '../../../shared/middleware/ipAllowlist.js';
-import { idempotency } from '../../../shared/middleware/idempotency.js';
+import { authGuard } from '../../../shared/infrastructure/middleware/authGuard.js';
+import { validate } from '../../../shared/infrastructure/middleware/validate.js';
+import { webhookRawBody } from '../../../shared/infrastructure/middleware/webhookRawBody.js';
+import { rateLimit } from '../../../shared/infrastructure/middleware/rateLimit.js';
+import { ipAllowlist } from '../../../shared/infrastructure/middleware/ipAllowlist.js';
+import { idempotency } from '../../../shared/infrastructure/middleware/idempotency.js';
 import { 
   createPaymentSchema,
   refundPaymentSchema,
