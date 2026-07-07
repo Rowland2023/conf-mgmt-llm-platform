@@ -1,6 +1,6 @@
 import request from 'supertest';
 import express from 'express';
-import { rateLimit } from './rateLimit.js';
+import { rateLimit } from '../shared/infrastructure/middleware/rateLimit.js';
 
 describe('Rate Limiter Middleware Regression Tests', () => {
   let app;
