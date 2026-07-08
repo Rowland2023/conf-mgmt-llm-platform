@@ -1,55 +1,112 @@
-// Corrected paths (up 3 levels) and added ListEventsUseCase import
-// event.controllers.js
-import { CreateEventUseCase } from "../../application/use-case/create-event.usecase.js";
-import { GetEventByIdUseCase } from "../../application/use-case/get-event.usecase.js"; 
-import { RescheduleEventUseCase } from "../../application/use-case/reschedule-event.usecase.js";
-import { CancelEventUseCase } from "../../application/use-case/cancel-event.usecase.js";
-import { ListEventUseCase } from "../../application/use-case/list-event.usecase.js";
+export class EventController {
 
-export class EventController {   
-    static async createEvent(req, res, next) {
+    constructor({
+        createEventUseCase,
+        getEventByIdUseCase,
+        listEventsUseCase,
+        rescheduleEventUseCase,
+        cancelEventUseCase
+    }) {
+
+        this.createEventUseCase = createEventUseCase;
+        this.getEventByIdUseCase = getEventByIdUseCase;
+        this.listEventsUseCase = listEventsUseCase;
+        this.rescheduleEventUseCase = rescheduleEventUseCase;
+        this.cancelEventUseCase = cancelEventUseCase;
+
+        this.createEvent = this.createEvent.bind(this);
+        this.listEvents = this.listEvents.bind(this);
+        this.getEventById = this.getEventById.bind(this);
+        this.rescheduleEvent = this.rescheduleEvent.bind(this);
+        this.cancelEvent = this.cancelEvent.bind(this);
+    }
+
+    async createEvent(req, res, next) {
         try {
-            const result = await CreateEventUseCase.execute(req.body);
-            return res.status(201).json({ success: true, data: result });
+
+            const result = await this.createEventUseCase.execute(req.body);
+
+            return res.status(201).json({
+                success: true,
+                data: result
+            });
+
         } catch (error) {
             next(error);
         }
     }
 
-    static async listEvents(req, res, next) {
+    async listEvents(req, res, next) {
+
         try {
-            const result = await ListEventsUseCase.execute(req.query); 
-            return res.status(200).json({ success: true, data: result });
+
+            const result = await this.listEventsUseCase.execute(req.query);
+
+            return res.status(200).json({
+                success: true,
+                data: result
+            });
+
         } catch (error) {
             next(error);
         }
     }
 
-    static async getEventById(req, res, next) {
+    async getEventById(req, res, next) {
+
         try {
-            // FIXED: Changed GetEventUseCase to GetEventByIdUseCase to match the import
-            const result = await GetEventByIdUseCase.execute(req.params.id);
-            return res.status(200).json({ success: true, data: result });
+
+            const result =
+                await this.getEventByIdUseCase.execute({
+                    eventId: req.params.id
+                });
+
+            return res.status(200).json({
+                success: true,
+                data: result
+            });
+
         } catch (error) {
             next(error);
         }
     }
 
-    static async rescheduleEvent(req, res, next) {
+    async rescheduleEvent(req, res, next) {
+
         try {
-            const result = await RescheduleEventUseCase.execute({ eventId: req.params.id, newDate: req.body.newDate });
-            return res.status(200).json({ success: true, data: result });
+
+            const result =
+                await this.rescheduleEventUseCase.execute({
+                    eventId: req.params.id,
+                    ...req.body
+                });
+
+            return res.status(200).json({
+                success: true,
+                data: result
+            });
+
         } catch (error) {
             next(error);
         }
     }
 
-    static async cancelEvent(req, res, next) {
+    async cancelEvent(req, res, next) {
+
         try {
-            const result = await CancelEventUseCase.execute(req.params.id);
-            return res.status(200).json({ success: true, data: result });
+
+            const result =
+                await this.cancelEventUseCase.execute({
+                    eventId: req.params.id
+                });
+
+            return res.status(200).json({
+                success: true,
+                data: result
+            });
+
         } catch (error) {
             next(error);
-        }   
+        }
     }
 }
