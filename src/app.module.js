@@ -1,47 +1,80 @@
-import express from 'express';
-import eventScheduleRouter from './modules/Event Schedule/api/routes/event.routes.js'; 
-import { createNotificationRouter } from './modules/Notification/api/notification.route.js';
+// src/app.module.js
 
-// 1. IMPORT THE CORRECT FUNCTION AND CONTROLLERS
-import { getPaymentRoutes } from './modules/Payment/api/payment.route.js';
-import { notificationController } from './modules/Notification/api/notification.controller.js';
-import { paymentController, paymentWebhookController } from './modules/Payment/api/payment.controller.js';
+import express from "express";
 
-// --- REGISTRATION MODULE IMPORT ---
-import { initRegistrationModule } from './modules/registration/index.js';
-// Replace this with your actual knex database connection instance import path
-import { db } from './shared/infrastructure/database/knex.js'; 
+import { db } from "./shared/infrastructure/database/knex.js";
+
+import { initEventModule } from "./modules/Event Schedule/index.js";
+import { initPaymentModule } from "./modules/Payment/index.js";
+import { initNotificationModule } from "./modules/Notification/index.js";
+import { initRegistrationModule } from "./modules/registration/index.js";
 
 const app = express();
 
-// Standard Body Parser Middleware (required to read req.body inside schemas)
+// ----------------------------------------------------
+// Global Middleware
+// ----------------------------------------------------
+
 app.use(express.json());
 
-const notificationRouter = createNotificationRouter(notificationController);
+// app.use(cors());
+// app.use(helmet());
+// app.use(compression());
+// app.use(requestLogger);
+// app.use(requestId);
 
-// 2. BUILD THE EXPRESS ROUTER FROM THE ROUTES ARRAY
-const paymentRouter = express.Router();
-const routesConfig = getPaymentRoutes(paymentController, paymentWebhookController);
+// ----------------------------------------------------
+// Feature Modules
+// ----------------------------------------------------
 
-routesConfig.forEach((route) => {
-  // Dynamically applies methods like paymentRouter.post() or paymentRouter.get()
-  paymentRouter[route.method](route.path, ...route.middleware, route.handler);
+app.use("/api/events", initEventModule(db));
+app.use("/api/payments", initPaymentModule(db));
+app.use("/api/notifications", initNotificationModule(db));
+app.use("/api/registrations", initRegistrationModule(db));
+
+// ----------------------------------------------------
+// Health Check
+// ----------------------------------------------------
+
+app.get("/", (req, res) => {
+    res.status(200).json({
+        status: "ok",
+        service: "conference-management",
+        version: "1.0.0"
+    });
 });
 
-// --- REGISTRATION ROUTER INITIALIZATION ---
-// Injecting the raw database connection straight into the self-wiring container
-const registrationRouter = initRegistrationModule(db);
+// ----------------------------------------------------
+// 404 Handler
+// ----------------------------------------------------
 
-// 3. MOUNT THE ROUTERS
-app.use('/api/notifications', notificationRouter);
-app.use('/api/payments', paymentRouter);
-app.use('/api/events', eventScheduleRouter);
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: {
+            code: "ROUTE_NOT_FOUND",
+            message: "The requested resource does not exist."
+        }
+    });
+});
 
-// Mount the clean REST API endpoint for registrations
-app.use('/api/registrations', registrationRouter);
+// ----------------------------------------------------
+// Global Error Handler
+// ----------------------------------------------------
 
-app.get('/', (req, res) => {
-  res.status(200).send('Hello World');
+app.use((err, req, res, next) => {
+
+    console.error(err);
+
+    const status = err.statusCode || 500;
+
+    res.status(status).json({
+        success: false,
+        error: {
+            code: err.code || "INTERNAL_SERVER_ERROR",
+            message: err.message || "An unexpected error occurred."
+        }
+    });
 });
 
 export default app;
