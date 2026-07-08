@@ -1,12 +1,35 @@
-import {Router} from'express';
-import {EventController} from "../controllers/event.controllers.js";
+// src/modules/Event Schedule/api/routes/event.routes.js
 
-const router = Router();
+import { Router } from 'express';
 
-router.post('/', EventController.createEvent);
-router.get('/', EventController.listEvents);
-router.get('/:id', EventController.getEventById);
-router.patch('/:id/reschedule', EventController.rescheduleEvent);
-router.delete('/:id', EventController.cancelEvent);
+export default function createEventRouter(eventController) {
 
-export default router;
+    const router = Router();
+
+    router.post(
+        '/',
+        eventController.createEvent
+    );
+
+    router.get(
+        '/',
+        eventController.listEvents
+    );
+
+    router.get(
+        '/:id',
+        eventController.getEventById
+    );
+
+    router.patch(
+        '/:id/reschedule',
+        eventController.rescheduleEvent
+    );
+
+    router.delete(
+        '/:id',
+        eventController.cancelEvent
+    );
+
+    return router;
+}
