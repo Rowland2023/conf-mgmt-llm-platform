@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import app from './app.module.js';
+import app from './app.js';
 import {
   verifyDatabaseConnection,
   closeDatabaseConnection,
