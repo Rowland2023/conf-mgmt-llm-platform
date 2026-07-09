@@ -6,7 +6,7 @@ import { LLMCommandInterceptor } from './command_interceptor.js';
 export function initLLM({
   openAIConfig,
   featureFlags,
-  domainServices,
+  useCases,
   uowFactory,
   logger,
   telemetry

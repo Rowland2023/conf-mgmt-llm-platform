@@ -1,4 +1,4 @@
-import { Event } from "../../domain/entities/event.entity.js";
+import { Event } from "../../domain/entities/event.js";
 
 export class ConcurrencyError extends Error {
   constructor(msg) { 
