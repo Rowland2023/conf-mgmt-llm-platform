@@ -1,46 +1,107 @@
-// application/use-cases/GetPaymentByIdUseCase.js
-
-import { 
-  ValidationError, 
-  NotFoundError, 
-  UnauthorizedError // Added to match your 401 intention
+import {
+    ValidationError,
+    NotFoundError
 } from "../../domain/errors/PaymentErrors.js";
 
+import { GetPaymentByIdQuery } from "../../domain/queries/GetPaymentByIdQuery.js";
+
 export class GetPaymentByIdUseCase {
-  constructor({ paymentRepository }) {
-    this.paymentRepository = paymentRepository;
-  }
+    constructor({
+        paymentRepository,
+        logger = console,
+        metrics
+    }) {
+        if (!paymentRepository) {
+            throw new Error(
+                "GetPaymentByIdUseCase requires paymentRepository."
+            );
+        }
 
-  async execute(command) {
-    const { id, currentUser } = command;
-
-    // 1. Strict Structural Parameters Guard
-    if (!id) {
-      throw new ValidationError("Payment lookup failed: Payment identity ID parameter is mandatory.");
-    }
-    if (!currentUser) {
-      // Clean mapping: Yields a proper 401 downstream instead of a 400 validation error
-      throw new UnauthorizedError("Unauthorized access: Authenticated user context missing.");
-    }
-
-    // 2. Fetch Entity from Database Abstraction
-    const payment = await this.paymentRepository.findById(id);
-    
-    // 3. Robust Business Authorization Rules & Enumeration Guard
-    if (!payment) {
-      throw new NotFoundError(`Transaction query failed: No payment records matched ID.`);
+        this.paymentRepository = paymentRepository;
+        this.logger = logger;
+        this.metrics = metrics;
     }
 
-    const isAdmin = currentUser.role === 'admin';
-    const isIndividualOwner = payment.email === currentUser.email || payment.userId === currentUser.id;
-    const isSameTenantOwner = currentUser.tenantId && payment.tenantId === currentUser.tenantId;
+    async execute(input) {
+        const startedAt = Date.now();
 
-    if (!isIndividualOwner && !isSameTenantOwner && !isAdmin) {
-      // Secure Context Masking: Deny visibility to hide resource existence entirely
-      throw new NotFoundError(`Transaction query failed: No payment records matched ID.`);
+        const query = new GetPaymentByIdQuery(input);
+
+        const payment = await this.#loadPayment(query.id);
+
+        this.#authorize(payment, query.currentUser);
+
+        this.logger.info?.(
+            {
+                paymentId: payment.id,
+                tenantId: payment.tenantId,
+                requestedBy: query.currentUser.id
+            },
+            "Payment retrieved."
+        );
+
+        this.metrics?.increment?.("payment.get.request");
+        this.metrics?.histogram?.(
+            "payment.get.duration",
+            Date.now() - startedAt
+        );
+
+        return payment.toResponse();
     }
 
-    // 4. Pure Clean Architecture Serialization Boundary Protection
-    return payment.toResponse();
-  }
+    async #loadPayment(paymentId) {
+        const payment =
+            await this.paymentRepository.findById(paymentId);
+
+        if (!payment) {
+            // Prevent resource enumeration
+            throw new NotFoundError(
+                "Payment not found."
+            );
+        }
+
+        return payment;
+    }
+
+    #authorize(payment, currentUser) {
+        if (!currentUser) {
+            throw new ValidationError(
+                "Authenticated user context is required."
+            );
+        }
+
+        // Platform administrator
+        if (currentUser.role === "admin") {
+            return;
+        }
+
+        // Tenant isolation
+        if (
+            currentUser.tenantId &&
+            payment.tenantId === currentUser.tenantId
+        ) {
+            return;
+        }
+
+        // Individual ownership
+        if (
+            payment.userId &&
+            payment.userId === currentUser.id
+        ) {
+            return;
+        }
+
+        if (
+            payment.email &&
+            currentUser.email &&
+            payment.email === currentUser.email
+        ) {
+            return;
+        }
+
+        // Hide existence of resources belonging to another tenant
+        throw new NotFoundError(
+            "Payment not found."
+        );
+    }
 }
