@@ -1,167 +1,112 @@
-// application/use-cases/CreatePaymentUseCase.js
-
-import {
-  ValidationError,
-  GatewayError,
-} from "../../domain/errors/PaymentErrors.js";
-
+import { ValidationError, GatewayError } from "../../domain/errors/PaymentErrors.js";
 import { Payment } from "../../domain/entities/Payment.js";
-import { PaymentStatus } from "../../domain/constants/PaymentStatus.js";
-
-const SUPPORTED_CURRENCIES = new Set(["NGN", "USD", "GBP"]);
+import { CreatePaymentCommand } from "../../domain/commands/CreatePaymentCommand.js";
 
 export class CreatePaymentUseCase {
-  constructor({
-    paymentRepository,
-    paymentGateway,
-    logger,
-    clock,
-    idGenerator,
-  }) {
-    this.paymentRepository = paymentRepository;
-    this.paymentGateway = paymentGateway;
-    this.logger = logger;
-    this.clock = clock;
-    this.idGenerator = idGenerator;
-  }
-
-  async execute(command) {
-    this.validate(command);
-
-    const {
-      bookingId,
-      amount,
-      currency = "NGN",
-      email,
-      tenantId,
-      requestedBy,
-      idempotencyKey,
-    } = command;
-
-    // ----------------------------
-    // Idempotency
-    // ----------------------------
-
-    const existing =
-      await this.paymentRepository.findByIdempotencyKey(
-        tenantId,
-        idempotencyKey
-      );
-
-    if (existing) {
-      return existing.toResponse();
+    constructor(deps) {
+        Object.assign(this, deps);
     }
 
-    // ----------------------------
-    // Create Payment Intent
-    // ----------------------------
+    async execute(input) {
+        const startedAt = Date.now();
+        const command = new CreatePaymentCommand(input);
 
-    const payment = Payment.create({
-      id: this.idGenerator.generate(),
-      bookingId,
-      tenantId,
-      amount,
-      currency,
-      email,
-      createdBy: requestedBy,
-      createdAt: this.clock.now(),
-      status: PaymentStatus.PENDING,
-      idempotencyKey,
-    });
+        let payment = await this._loadOrCreate(command);
+        
+        if (payment.status === "CREATED") {
+            payment = await this._initializeGateway(payment);
+        }
 
-    await this.paymentRepository.save(payment);
+        this.metrics?.increment?.("payment.created");
+        this.metrics?.histogram?.("payment.creation.duration", Date.now() - startedAt);
+        
+        return payment.toResponse();
+    }
 
-    let gatewaySession;
+    async _loadOrCreate(command) {
+        try {
+            return await this.unitOfWork.execute(async (trx) => {
+                const existing = await this.paymentRepository.findByIdempotencyKey(command.tenantId, command.idempotencyKey, trx);
+                if (existing) return existing;
 
-    try {
-      gatewaySession =
-        await this.paymentGateway.initializeTransaction({
-          reference: payment.id,
-          amount: payment.amount,
-          currency: payment.currency,
-          email: payment.email,
-          metadata: payment.gatewayMetadata(),
+                const payment = Payment.create({
+                    id: this.idGenerator.generate(),
+                    ...command,
+                    status: "CREATED",
+                    createdAt: this.clock.now()
+                });
+
+                await this.paymentRepository.save(payment, trx);
+                await this._flushEvents(payment, trx);
+                return payment;
+            });
+        } catch (error) {
+            if (this._isUniqueViolation(error)) {
+                this.metrics?.increment?.("payment.idempotency.hit");
+                const concurrentRecord = await this.paymentRepository.findByIdempotencyKey(command.tenantId, command.idempotencyKey);
+                
+                if (!concurrentRecord) {
+                    throw new ValidationError("A concurrent payment request is currently processing. Please retry.");
+                }
+                return concurrentRecord;
+            }
+            throw error;
+        }
+    }
+
+    async _initializeGateway(payment) {
+        const gateway = this.paymentGatewayFactory.create(payment.gateway);
+        let session;
+
+        // 1. Fire external network call safely OUTSIDE of database transactions
+        try {
+            session = await gateway.initializeTransaction({
+                reference: payment.id,
+                amount: payment.amount,
+                currency: payment.currency,
+                email: payment.email,
+                metadata: payment.gatewayMetadata()
+            });
+        } catch (error) {
+            // 2. Safely capture failure using a short, fast row-lock transaction block
+            return await this.unitOfWork.execute(async (trx) => {
+                const fresh = await this.paymentRepository.findByIdForUpdate(payment.id, trx);
+                if (fresh.status !== "CREATED") return fresh;
+
+                fresh.markInitializationFailed({
+                    message: error.message,
+                    code: error.code,
+                    provider: fresh.gateway
+                });
+                await this.paymentRepository.update(fresh, trx);
+                await this._flushEvents(fresh, trx);
+                return fresh;
+            });
+        }
+
+        // 3. Update success using a short, fast row-lock transaction block
+        return await this.unitOfWork.execute(async (trx) => {
+            const fresh = await this.paymentRepository.findByIdForUpdate(payment.id, trx);
+            if (fresh.status !== "CREATED") return fresh; // Idempotent protection
+
+            fresh.markGatewayInitialized({
+                externalReference: session.reference,
+                checkoutUrl: session.checkoutUrl
+            });
+
+            await this.paymentRepository.update(fresh, trx);
+            await this._flushEvents(fresh, trx);
+            return fresh;
         });
+    }
 
-    } catch (error) {
-
-      payment.markFailed(
-        `Gateway initialization failed: ${error.message}`
-      );
-
-      await this.paymentRepository.update(payment);
-
-      throw new GatewayError(
-        "Unable to initialize payment.",
-        {
-          cause: error,
+    async _flushEvents(aggregate, trx) {
+        for (const event of aggregate.pullDomainEvents()) {
+            await this.outboxRepository.save(event, trx);
         }
-      );
     }
 
-    // ----------------------------
-    // Sync External Reference
-    // ----------------------------
-
-    try {
-
-      payment.markGatewayInitialized(
-        gatewaySession.reference
-      );
-
-      await this.paymentRepository.update(payment);
-
-    } catch (error) {
-
-      this.logger.error(
-        "Gateway initialized but database update failed.",
-        {
-          paymentId: payment.id,
-          tenantId,
-          reference: gatewaySession.reference,
-          error,
-        }
-      );
+    _isUniqueViolation(error) {
+        return error.code === "23505" || /unique|duplicate/i.test(error.message);
     }
-
-    return {
-      paymentId: payment.id,
-      externalReference: gatewaySession.reference,
-      checkoutUrl: gatewaySession.checkoutUrl,
-      status: payment.status,
-    };
-  }
-
-  validate({
-    bookingId,
-    amount,
-    currency,
-    email,
-    idempotencyKey,
-  }) {
-
-    if (!bookingId) {
-      throw new ValidationError("bookingId is required.");
-    }
-
-    if (!email) {
-      throw new ValidationError("email is required.");
-    }
-
-    if (!idempotencyKey) {
-      throw new ValidationError("idempotencyKey is required.");
-    }
-
-    if (!Number.isInteger(amount) || amount <= 0) {
-      throw new ValidationError(
-        "Amount must be a positive integer."
-      );
-    }
-
-    if (!SUPPORTED_CURRENCIES.has(currency)) {
-      throw new ValidationError(
-        `Unsupported currency: ${currency}`
-      );
-    }
-  }
 }

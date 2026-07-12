@@ -1,91 +1,129 @@
 import { ValidationError } from "../../domain/errors/PaymentErrors.js";
+import { GetAllPaymentsQuery } from "../../domain/queries/GetAllPaymentsQuery.js";
 
-// Define a strict whitelist for statuses
-const VALID_STATUSES = new Set(['PENDING', 'GATEWAY_INITIALIZED', 'SUCCESSFUL', 'FAILED', 'REFUNDED']);
+const ALLOWED_SORT_FIELDS = new Set([
+    "createdAt",
+    "updatedAt",
+    "amount",
+    "status",
+    "currency"
+]);
+
+const ALLOWED_SORT_DIRECTIONS = new Set([
+    "asc",
+    "desc"
+]);
 
 export class GetAllPaymentsUseCase {
-  constructor({ paymentRepository, logger }) {
-    this.paymentRepository = paymentRepository;
-    this.logger = logger;
-  }
-
-  async execute(command) {
-    const { 
-      page = 1, 
-      limit = 20, 
-      status, 
-      tenantId, 
-      currentUser 
-    } = command;
-
-    // 1. Strict Authentication/Authorization Boundary Guard
-    if (!currentUser) {
-      throw new ValidationError("Unauthorized: Missing user context.");
-    }
-
-    // Determine target tenant safely
-    let targetTenantId;
-    if (currentUser.role === 'admin') {
-      // Admins can scope down to a tenant, or fetch everything if tenantId is omitted
-      targetTenantId = tenantId; 
-    } else {
-      // Regular users are tightly locked to their own tenant. No exceptions.
-      if (!currentUser.tenantId) {
-        throw new ValidationError("Access Denied: User context does not belong to a valid tenant.");
-      }
-      targetTenantId = currentUser.tenantId;
-    }
-
-    // 2. Filter Sanitation & Validation
-    if (status && !VALID_STATUSES.has(status)) {
-      throw new ValidationError(`Invalid query parameter: status '${status}' is not recognized.`);
-    }
-
-    // 3. Bulletproof Number Parsing Guardrails
-    const parsedPage = parseInt(page, 10);
-    const parsedLimit = parseInt(limit, 10);
-
-    const sanitizedPage = Number.isNaN(parsedPage) ? 1 : Math.max(1, parsedPage);
-    const sanitizedLimit = Number.isNaN(parsedLimit) ? 20 : Math.max(1, Math.min(100, parsedLimit));
-    
-    const offset = (sanitizedPage - 1) * sanitizedLimit;
-
-    // Construct the strictly scrubbed criteria object
-    const filterCriteria = {
-      ...(status && { status }),
-      ...(targetTenantId && { tenantId: targetTenantId }) 
-    };
-
-    try {
-      // 4. Parallel Execution
-      const [paymentEntities, totalCount] = await Promise.all([
-        this.paymentRepository.findMany(filterCriteria, { limit: sanitizedLimit, offset }),
-        this.paymentRepository.count(filterCriteria)
-      ]);
-
-      // 5. Decouple storage schema from outward-facing representation
-      const serializedPayments = paymentEntities.map(payment => payment.toResponse());
-
-      return {
-        data: serializedPayments,
-        pagination: {
-          total: totalCount,
-          page: sanitizedPage,
-          limit: sanitizedLimit,
-          totalPages: Math.ceil(totalCount / sanitizedLimit)
+    constructor({
+        paymentRepository,
+        logger = console,
+        metrics
+    }) {
+        if (!paymentRepository) {
+            throw new Error("GetAllPaymentsUseCase requires paymentRepository.");
         }
-      };
 
-    } catch (dbError) {
-      // Log metadata carefully—never log raw sensitive user data
-      this.logger.error("Database extraction failure during execution of GetAllPayments.", {
-        hasStatusFilter: !!status,
-        targetTenantId,
-        error: dbError.message
-      });
-      
-      // Masking raw DB driver strings from leaking infrastructure details to the client
-      throw new Error("Internal system exception occurred during ledger collection retrieval.");
+        this.paymentRepository = paymentRepository;
+        this.logger = logger;
+        this.metrics = metrics;
     }
-  }
+
+    async execute(input) {
+        const startedAt = Date.now();
+        const query = new GetAllPaymentsQuery(input);
+        
+        // Resolve security boundaries explicitly
+        const tenantContext = this.#resolveTenantContext(query);
+
+        // Limit maximum batch sizing defensively to prevent memory saturation crashes
+        const requestedLimit = Math.min(query.limit ?? 25, 100);
+        const page = Math.max(query.page ?? 1, 1);
+        
+        // Calculate the raw database offset using the actual intended page size,
+        // preventing the "limit + 1" trick from messing up downstream database math.
+        const offset = (page - 1) * requestedLimit;
+
+        const criteria = {
+            ...tenantContext, // Merges either { tenantId } or { isGlobalAdminQuery: true }
+            status: query.status,
+            bookingId: query.bookingId,
+            email: query.email,
+            gateway: query.gateway,
+            currency: query.currency,
+            offset, 
+            limit: requestedLimit + 1, // Lookahead padding for hasNext calculation
+            sortBy: this.#normalizeSortField(query.sortBy),
+            sortDirection: this.#normalizeSortDirection(query.sortDirection)
+        };
+
+        this.logger.info?.(
+            { tenantId: criteria.tenantId, page, limit: requestedLimit, status: criteria.status },
+            "Listing payments."
+        );
+
+        // Execute a fast, single query instead of running two separate lookups
+        const payments = await this.paymentRepository.findMany(criteria);
+
+        // Evaluate if a next page exists based on the extra element presence
+        const hasNext = payments.length > requestedLimit;
+        
+        // Trim your array back down to what the client actually requested
+        if (hasNext) {
+            payments.pop();
+        }
+
+        this.metrics?.increment?.("payment.list.request");
+        this.metrics?.histogram?.("payment.list.duration", Date.now() - startedAt);
+
+        return {
+            items: payments.map(payment => payment.toResponse()),
+            pagination: {
+                page,
+                limit: requestedLimit,
+                hasNext,
+                hasPrevious: page > 1
+            }
+        };
+    }
+
+    #resolveTenantContext(query) {
+        if (!query.currentUser) {
+            throw new ValidationError("Authenticated user context is required.");
+        }
+
+        // Global Platform Administrators handling cross-tenant dashboards
+        if (query.currentUser.role === "admin") {
+            if (query.tenantId) {
+                return { tenantId: query.tenantId };
+            }
+            // Explicitly flag cross-tenant querying so your repository tier 
+            // doesn't accidentally drop the multi-tenant where clause by mistake.
+            return { isGlobalAdminQuery: true };
+        }
+
+        // Standard Tenant Isolation boundaries
+        if (!query.currentUser.tenantId) {
+            throw new ValidationError("Authenticated user is not associated with a tenant.");
+        }
+
+        return { tenantId: query.currentUser.tenantId };
+    }
+
+    #normalizeSortField(sortBy) {
+        if (!sortBy) return "createdAt";
+        if (!ALLOWED_SORT_FIELDS.has(sortBy)) {
+            throw new ValidationError(`Unsupported sort field '${sortBy}'.`);
+        }
+        return sortBy;
+    }
+
+    #normalizeSortDirection(direction) {
+        if (!direction) return "desc";
+        const normalized = direction.toLowerCase();
+        if (!ALLOWED_SORT_DIRECTIONS.has(normalized)) {
+            throw new ValidationError(`Unsupported sort direction '${direction}'.`);
+        }
+        return normalized;
+    }
 }
