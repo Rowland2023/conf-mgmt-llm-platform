@@ -1,52 +1,121 @@
-// src/modules/registration/index.js
+// modules/registration/index.js
 
-// 1. Infrastructure Core
-import { RegistrationRepository } from './infrastructure/RegistrationRepository.js';
-import { RegistrationController } from './infrastructure/Registration.controller.js';
-import { createRegistrationRouter } from './infrastructure/registration.routes.js';
+// 1. Infrastructure Layer Dependencies
+import { PostgresRegistrationRepository } from "./infrastructure/persistence/repositories/PostgresRegistrationRepository.js";
+import { RegistrationMapper } from "./infrastructure/persistence/mappers/RegistrationMapper.js";
 
-// 2. Application Use Cases
-import { CreateRegistrationUseCase } from './application/user-cases/CreateRegistrationUseCase.js';
-import { UpdateRegistrationUseCase } from './application/user-cases/UpdateRegistrationUseCase.js';
-import { GetRegistrationUseCase } from './application/user-cases/GetRegistrationUseCase.js';
-import { GetAllRegistrationsUseCase } from './application/user-cases/GetAllRegistrationsUseCase.js';
+// 2. Application Layer Use Cases
+import { CreateRegistrationUseCase } from "./application/use-cases/CreateRegistrationUseCase.js";
+import { GetRegistrationUseCase } from "./application/use-cases/GetRegistrationUseCase.js";
+import { GetAllRegistrationsUseCase } from "./application/use-cases/GetAllRegistrationsUseCase.js";
+import { UpdateRegistrationUseCase } from "./application/use-cases/UpdateRegistrationUseCase.js";
+import { CancelRegistrationUseCase } from "./application/use-cases/CancelRegistrationUseCase.js";
+import { CheckInRegistrationUseCase } from "./application/use-cases/CheckInRegistrationUseCase.js";
+
+// 3. Presentation Layer Components (Direct Imports)
+import { RegistrationController } from "./api/registration.controller.js";
+import { getRegistrationRoutes } from "./api/registration.route.js";
 
 /**
- * Initializes the entire Registration Module.
- * @param {Object} dbConnection - The Knex database client connection instance.
- * @returns {Function} Express Router configured with full dependency trees.
+ * Composition Root factory organizing the Registration system module.
+ * Instantiates and wires up all layers internally without needing an api/index.js facade.
  */
-export function initRegistrationModule(dbConnection) {
-  // A. Initialize Repository with db driver context
-  const registrationRepository = new RegistrationRepository(dbConnection);
+export function createRegistrationModule({
+  db,
+  redis,
+  logger,
+  transactionManager,
+  outboxRepository,
+  conferenceRepository,
+  eventBus,
+  config
+}) {
 
-  // B. Instantiate Use Cases with injected repositories/services
-  const createRegistrationUseCase = new CreateRegistrationUseCase({
-    registrationRepository,
+  // =========================================================================
+  // 1. Infrastructure Assembly
+  // =========================================================================
+  const registrationMapper = new RegistrationMapper();
+
+  const registrationRepository = new PostgresRegistrationRepository({
+    db,
+    registrationMapper
   });
 
-  const updateRegistrationUseCase = new UpdateRegistrationUseCase({
+  // =========================================================================
+  // 2. Application Use Cases Assembly
+  // =========================================================================
+  const createRegistrationUseCase = new CreateRegistrationUseCase({
     registrationRepository,
+    conferenceRepository,
+    transactionManager,
+    outboxRepository,
+    logger
   });
 
   const getRegistrationUseCase = new GetRegistrationUseCase({
     registrationRepository,
+    logger
   });
 
   const getAllRegistrationsUseCase = new GetAllRegistrationsUseCase({
     registrationRepository,
+    logger
   });
 
-  // C. Inject Use Cases into Controller
+  const updateRegistrationUseCase = new UpdateRegistrationUseCase({
+    registrationRepository,
+    transactionManager,
+    outboxRepository,
+    logger
+  });
+
+  const cancelRegistrationUseCase = new CancelRegistrationUseCase({
+    registrationRepository,
+    conferenceRepository,
+    outboxRepository,
+    transactionManager
+  });
+
+  const checkInRegistrationUseCase = new CheckInRegistrationUseCase({
+    registrationRepository,
+    transactionManager,
+    outboxRepository,
+    logger
+  });
+
+  // =========================================================================
+  // 3. Presentation Integration (Wired Directly)
+  // =========================================================================
   const registrationController = new RegistrationController({
     createRegistrationUseCase,
-    updateRegistrationUseCase,
     getRegistrationUseCase,
     getAllRegistrationsUseCase,
+    updateRegistrationUseCase,
+    cancelRegistrationUseCase,
+    checkInRegistrationUseCase
   });
 
-  // D. Pass controller handlers into Router generator
-  const registrationRouter = createRegistrationRouter(registrationController);
+  // Generate the Express router by passing the controller straight into it
+  const router = getRegistrationRoutes(registrationController);
 
-  return registrationRouter;
+  // =========================================================================
+  // 4. Clean Module Manifest Exports
+  // =========================================================================
+  return {
+    router, 
+    controller: registrationController,
+
+    repositories: {
+      registrationRepository
+    },
+
+    useCases: {
+      createRegistrationUseCase,
+      getRegistrationUseCase,
+      getAllRegistrationsUseCase,
+      updateRegistrationUseCase,
+      cancelRegistrationUseCase,
+      checkInRegistrationUseCase
+    }
+  };
 }

@@ -1,93 +1,82 @@
-// src/application/use-cases/UpdateRegistrationUseCase.js
 import { NotFoundError, UnauthorizedError, BusinessRuleValidationError } from '../../domain/errors/DomainErrors.js';
 
 export class UpdateRegistrationUseCase {
-  constructor({ registrationRepository, conferenceRepository, transactionManager }) {
+  constructor({ registrationRepository, conferenceRepository, outboxRepository, transactionManager }) {
     this.registrationRepository = registrationRepository;
     this.conferenceRepository = conferenceRepository;
-    this.transactionManager = transactionManager; // To manage capacity checks and modifications atomically
+    this.outboxRepository = outboxRepository;
+    this.transactionManager = transactionManager;
   }
 
   async execute({ registrationId, ticketTier, attendeeNotes } = {}, currentUser) {
-    // 1. Structural Layer Input Defense
     if (!registrationId) {
       throw new NotFoundError("Registration identifier is required.");
     }
 
-    // 2. Wrap execution inside a transaction block to handle concurrent multi-table state updates
     return await this.transactionManager.runInTransaction(async (tx) => {
-      
-      // 3. Fetch the target entity
-      const registration = await this.registrationRepository.findById(registrationId, tx);
+      // 1. Lock registration first to serialize concurrent edits
+      const registration = await this.registrationRepository.findByIdForUpdate(registrationId, tx);
       if (!registration) {
-        throw new NotFoundError("Registration not found."); // Obfuscates existence for bad actors
+        throw new NotFoundError("Registration not found.");
       }
 
-      // 4. Enforce Contextual Authorization Guards (BOLA Protection)
+      // 2. Authorization - blind-wall for attendees and organizers
       if (!currentUser.isAdmin()) {
         if (currentUser.isAttendee()) {
           if (registration.userId !== currentUser.id) {
-            throw new NotFoundError("Registration not found."); // Maintain 404 blind-wall security strategy
+            throw new NotFoundError("Registration not found.");
           }
-          
-          // Attendee Mutation Constraints: Attendees cannot arbitrarily upgrade tiers without paying/checking parameters
           if (ticketTier && ticketTier !== registration.ticketTier) {
-            throw new UnauthorizedError("Unauthorized: Attendees cannot directly modify ticket tiers. Please use the upgrade workflow.");
+            throw new UnauthorizedError("Attendees cannot modify ticket tiers. Use upgrade workflow.");
           }
-        } 
-        
-        else if (currentUser.isOrganizer()) {
+          if (registration.status === 'CHECKED_IN') {
+            throw new BusinessRuleValidationError("Cannot modify registration after check-in.");
+          }
+        } else if (currentUser.isOrganizer()) {
           const isOwner = await this.conferenceRepository.isOrganizerOf(registration.conferenceId, currentUser.id, tx);
           if (!isOwner) {
-            throw new UnauthorizedError("Unauthorized: This registration belongs to an unmanaged event.");
+            throw new NotFoundError("Registration not found."); // Blind-wall
           }
-        } 
-        
-        else {
-          throw new UnauthorizedError("Unauthorized: Invalid execution context authorization.");
+        } else {
+          throw new UnauthorizedError("Invalid execution context.");
         }
       }
 
-      // 5. Fetch associated conference if domain logic rules are impacted (like changing capacity)
+      // 3. Lock conference for capacity checks
       const conference = await this.conferenceRepository.findByIdWithLock(registration.conferenceId, tx);
       if (!conference) {
         throw new NotFoundError("Associated conference not found.");
       }
 
-      // Guard Rail: Prevent updates to historical, locked down data
       if (conference.isPastRegistrationDeadline()) {
-        throw new BusinessRuleValidationError("This event lifecycle is closed. Modifications are disabled.");
+        throw new BusinessRuleValidationError("Event lifecycle closed. Modifications disabled.");
       }
 
-      // 6. Evaluate Tier Capacity Shifts under Concurrency Restraints
-      // If an Organizer or Admin is upgrading/changing the tier, verify the new tier isn't sold out
+      // 4. Tier capacity check if changing
       if (ticketTier && ticketTier !== registration.ticketTier) {
-        const currentTierCount = await this.registrationRepository.countActiveRegistrationsByTier(registration.conferenceId, ticketTier, tx);
-        
+        const currentTierCount = await this.registrationRepository.countActiveRegistrationsByTier(
+          registration.conferenceId, 
+          ticketTier, 
+          tx
+        );
         if (conference.isTierFullyBooked(ticketTier, currentTierCount)) {
-          throw new BusinessRuleValidationError(`The targeted ticket tier [${ticketTier}] is sold out.`);
+          throw new BusinessRuleValidationError(`Ticket tier [${ticketTier}] is sold out.`);
         }
       }
 
-      // 7. Delegate Mutation Execution straight to the Domain Entity State Machine
-      // This protects entity invariants (e.g., enforcing valid tiers, validation structures)
-      registration.updateDetails({
-        ticketTier,
-        attendeeNotes
-      });
+      // 5. Idempotency check
+      if (registration.ticketTier === ticketTier && registration.attendeeNotes === attendeeNotes) {
+        return registration; // No-op
+      }
 
-      // 8. Atomic Persistence of complete mutated entity state
+      // 6. Domain mutation
+      registration.updateDetails({ ticketTier, attendeeNotes });
+
+      // 7. Atomic persist
       await this.registrationRepository.save(registration, tx);
+      await this.outboxRepository.saveMany(registration.pullDomainEvents(), tx);
 
-      return {
-        success: true,
-        message: "Registration updated successfully.",
-        registrationId: registration.id,
-        updatedFields: {
-          ticketTier: registration.ticketTier,
-          attendeeNotes: registration.attendeeNotes
-        }
-      };
+      return registration;
     });
   }
 }

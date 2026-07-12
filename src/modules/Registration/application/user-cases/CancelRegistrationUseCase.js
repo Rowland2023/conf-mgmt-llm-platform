@@ -1,44 +1,58 @@
+import { NotFoundError } from '../../domain/errors/DomainErrors.js';
+
 export class CancelRegistrationUseCase {
-  constructor({ registrationRepository, conferenceRepository, unitOfWork }) {
+  constructor({ registrationRepository, conferenceRepository, outboxRepository, transactionManager }) {
     this.registrationRepository = registrationRepository;
     this.conferenceRepository = conferenceRepository;
-    this.unitOfWork = unitOfWork; // Optional: For transaction handling
+    this.outboxRepository = outboxRepository;
+    this.transactionManager = transactionManager;
   }
 
-  async execute({ registrationId, userId }) {
-    // 1. Concurrent Fetching (Performance optimization)
-    const registration = await this.registrationRepository.findById(registrationId);
-    if (!registration) {
-      throw new Error("Registration not found."); // In prod, use custom AppErrors (e.g., NotFoundError)
+  async execute({ registrationId, currentUser }) {
+    if (!registrationId) {
+      throw new NotFoundError("Registration identifier is required.");
     }
 
-    // 2. Auth Guard
-    if (registration.userId !== userId) {
-      throw new Error("Unauthorized: You do not own this registration."); 
-    }
+    return await this.transactionManager.runInTransaction(async (tx) => {
+      const registration = await this.registrationRepository.findByIdForUpdate(registrationId, tx);
+      if (!registration) {
+        throw new NotFoundError("Registration not found.");
+      }
 
-    const conference = await this.conferenceRepository.findById(registration.conferenceId);
-    if (!conference) {
-      throw new Error("Associated conference not found.");
-    }
+      // Authorization: Admin bypass, else check ownership
+      if (!currentUser.isAdmin()) {
+        if (currentUser.isAttendee() && registration.userId !== currentUser.id) {
+          throw new NotFoundError("Registration not found."); // Blind-wall
+        }
+        if (currentUser.isOrganizer()) {
+          const isOwner = await this.conferenceRepository.isOrganizerOf(
+            registration.conferenceId, 
+            currentUser.id, 
+            tx
+          );
+          if (!isOwner) {
+            throw new NotFoundError("Registration not found."); // Blind-wall
+          }
+        }
+      }
 
-    // 3. Domain Logic delegated completely to entities
-    // Pass UTC timestamp to ensure timezone agnostic comparison
-    const nowUtc = Date.now(); 
-    if (!conference.isCancellableAt(nowUtc)) {
-      throw new Error("Cannot cancel a registration for this event timeline.");
-    }
+      const conference = await this.conferenceRepository.findById(registration.conferenceId, tx);
+      if (!conference) {
+        throw new NotFoundError("Associated conference not found.");
+      }
 
-    // 4. Update via Entity Domain Method
-    registration.cancel(); 
+      if (conference.isPastCancellationDeadline?.() || conference.isPastRegistrationDeadline()) {
+        throw new BusinessRuleValidationError(
+          "Event lifecycle closed. Cancellations no longer permitted."
+        );
+      }
 
-    // 5. Persist the whole entity state safely
-    await this.registrationRepository.save(registration);
+      registration.cancel(); // Domain state machine + emits event
 
-    return {
-      success: true,
-      message: "Registration successfully cancelled.",
-      registrationId: registration.id
-    };
+      await this.registrationRepository.update(registration, tx);
+      await this.outboxRepository.saveMany(registration.pullDomainEvents(), tx);
+      
+      // Return void. Controller handles HTTP.
+    });
   }
 }
