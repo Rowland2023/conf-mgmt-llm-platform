@@ -1,60 +1,87 @@
-// src/application/use-cases/CreateRegistrationUseCase.js
 import { NotFoundError, BusinessRuleValidationError } from '../../domain/errors/DomainErrors.js';
 import { Registration } from '../../domain/entities/Registration.js';
 
 export class CreateRegistrationUseCase {
-  constructor({ registrationRepository, conferenceRepository, uuidService, transactionManager }) {
+  constructor({ 
+    registrationRepository, 
+    conferenceRepository, 
+    outboxRepository, 
+    uuidService, 
+    transactionManager,
+    logger // NEW
+  }) {
     this.registrationRepository = registrationRepository;
     this.conferenceRepository = conferenceRepository;
+    this.outboxRepository = outboxRepository;
     this.uuidService = uuidService;
-    this.transactionManager = transactionManager; // Injected to manage safe database boundaries
+    this.transactionManager = transactionManager;
+    this.logger = logger.child({ useCase: 'CreateRegistrationUseCase' }); // bound context
   }
 
-  async execute({ conferenceId, userId, ticketTier = 'STANDARD' }) {
-    // Execute everything within an isolated database transaction block
-    return await this.transactionManager.runInTransaction(async (tx) => {
-      
-      // 1. Fetch conference with a lock (Row-level locking for concurrency protection)
-      const conference = await this.conferenceRepository.findByIdWithLock(conferenceId, tx);
-      if (!conference) {
-        throw new NotFoundError("The target conference does not exist.");
-      }
+  async execute(payload, currentUser) {
+    const { conferenceId, ticketType, notes, dietaryRequirements, specialAssistance } = payload;
+    const userId = currentUser.id;
 
-      // 2. Structural domain checking
-      if (conference.isPastRegistrationDeadline()) {
-        throw new BusinessRuleValidationError("Registration for this conference has closed.");
-      }
+    this.logger.info('Creating registration', { 
+      conferenceId, 
+      userId, 
+      ticketType 
+    }); // INFO: start of business operation
 
-      // 3. Double Booking Guard (Backed by a unique DB index)
-      const isAlreadyRegistered = await this.registrationRepository.existsByConferenceAndUser(conferenceId, userId, tx);
-      if (isAlreadyRegistered) {
-        throw new BusinessRuleValidationError("You have already registered for this conference.");
-      }
+    try {
+      return await this.transactionManager.runInTransaction(async (tx) => {
+        const conference = await this.conferenceRepository.findByIdWithLock(conferenceId, tx);
+        if (!conference) {
+          this.logger.warn('Conference not found', { conferenceId, userId });
+          throw new NotFoundError("Conference not found.");
+        }
 
-      // 4. Safe Capacity Check (Since row is locked, count won't fluctuate mid-flight)
-      const currentAttendeeCount = await this.registrationRepository.countActiveRegistrations(conferenceId, tx);
-      if (conference.isFullyBooked(currentAttendeeCount)) {
-        throw new BusinessRuleValidationError("This conference is sold out.");
-      }
+        if (conference.isPastRegistrationDeadline()) {
+          this.logger.warn('Registration deadline passed', { 
+            conferenceId, 
+            deadline: conference.registrationDeadline 
+          });
+          throw new BusinessRuleValidationError("Registration for this conference has closed.");
+        }
 
-      // 5. Create Domain Entity through a domain factory method
-      const registrationId = this.uuidService.generate();
-      const registration = Registration.createPending({
-        id: registrationId,
-        conferenceId,
-        userId,
-        ticketTier
+        const isAlreadyRegistered = await this.registrationRepository.existsByConferenceAndUser(conferenceId, userId, tx);
+        if (isAlreadyRegistered) {
+          this.logger.warn('Duplicate registration attempt', { conferenceId, userId });
+          throw new BusinessRuleValidationError("You have already registered for this conference.");
+        }
+
+        const registration = Registration.createPending({
+          id: this.uuidService.generate(),
+          conferenceId,
+          userId,
+          ticketType: ticketType || 'STANDARD',
+          conference, // locked aggregate
+          notes,
+          dietaryRequirements,
+          specialAssistance
+        });
+
+        await this.registrationRepository.save(registration, tx);
+        await this.conferenceRepository.update(conference, tx);
+        await this.outboxRepository.saveMany(registration.pullDomainEvents(), tx);
+
+        this.logger.info('Registration created successfully', { 
+          registrationId: registration.id, 
+          conferenceId,
+          userId,
+          ticketType: registration.ticketType
+        }); // INFO: business success
+
+        return registration;
       });
-
-      // 6. Safe Persist within transaction scope
-      await this.registrationRepository.save(registration, tx);
-
-      return {
-        success: true,
-        message: "Registration initialized successfully.",
-        registrationId: registration.id,
-        status: registration.status
-      };
-    });
+    } catch (err) {
+      this.logger.error('Failed to create registration', { 
+        conferenceId, 
+        userId, 
+        error: err.message,
+        stack: err.stack 
+      }); // ERROR: unexpected failure
+      throw err; // rethrow for controller
+    }
   }
 }

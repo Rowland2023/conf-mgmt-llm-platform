@@ -4,6 +4,10 @@ import { validate } from '../../../shared/middleware/validate.js';
 import {
   createRegistrationSchema,
   updateRegistrationSchema,
+  registrationIdSchema,
+  registrationQuerySchema,
+  checkInRegistrationSchema,
+  cancelRegistrationSchema
 } from './validators/registration.schema.js';
 
 export const getRegistrationRoutes = (registrationController) => {
@@ -19,12 +23,14 @@ export const getRegistrationRoutes = (registrationController) => {
   router.get(
     '/',
     authGuard,
+    validate(registrationQuerySchema), // Added query parameters validation
     registrationController.getAllRegistrations
   );
 
   router.get(
     '/:id',
     authGuard,
+    validate(registrationIdSchema), // Added structural path ID validation
     registrationController.getRegistrationById
   );
 
@@ -35,9 +41,17 @@ export const getRegistrationRoutes = (registrationController) => {
     registrationController.updateRegistration
   );
 
+  router.post(
+    '/:id/check-in', // Added missing operational endpoint mapping
+    authGuard,
+    validate(checkInRegistrationSchema),
+    registrationController.checkInRegistration
+  );
+
   router.delete(
     '/:id',
     authGuard,
+    validate(cancelRegistrationSchema), // Added removal schema validation
     registrationController.cancelRegistration
   );
 

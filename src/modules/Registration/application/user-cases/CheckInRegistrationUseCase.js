@@ -1,42 +1,56 @@
-// src/application/use-cases/CheckInRegistrationUseCase.js
-import { NotFoundError, UnauthorizedError } from '../../domain/errors/DomainErrors.js';
+import { NotFoundError, UnauthorizedError, BusinessRuleValidationError } from '../../domain/errors/DomainErrors.js';
 
 export class CheckInRegistrationUseCase {
-  constructor({ registrationRepository, conferenceRepository }) {
+  constructor({ registrationRepository, conferenceRepository, outboxRepository, transactionManager }) {
     this.registrationRepository = registrationRepository;
     this.conferenceRepository = conferenceRepository;
+    this.outboxRepository = outboxRepository;
+    this.transactionManager = transactionManager;
   }
 
-  async execute({ registrationId, organizerId }) {
-    // 1. Fetch registration
-    const registration = await this.registrationRepository.findById(registrationId);
-    if (!registration) {
-      throw new NotFoundError("Registration not found."); 
+  async execute({ registrationId, currentUser }) {
+    if (!registrationId) {
+      throw new NotFoundError("Registration identifier is required.");
     }
 
-    // 2. Security Guard
-    const conference = await this.conferenceRepository.findById(registration.conferenceId);
-    if (!conference) {
-      throw new NotFoundError("Associated conference not found.");
+    if (!currentUser.isAdmin() && !currentUser.isOrganizer()) {
+      throw new UnauthorizedError("Only organizers or administrators can check in attendees.");
     }
 
-    if (!conference.isOrganizer(organizerId)) {
-      throw new UnauthorizedError("Unauthorized: Only event organizers can check-in attendees."); 
-    }
+    return await this.transactionManager.runInTransaction(async (tx) => {
+      const registration = await this.registrationRepository.findByIdForUpdate(registrationId, tx);
+      if (!registration) {
+        throw new NotFoundError("Registration not found.");
+      }
 
-    // 3 & 4. True Delegation to the Domain Entity State Machine
-    // Let the entity's internal checkIn() method validate its own state transitions.
-    // If it is already checked in or cancelled, the entity throws the BusinessRuleValidationError.
-    registration.checkIn();
+      // Multi-tenant guard
+      if (currentUser.isOrganizer()) {
+        const isOwner = await this.conferenceRepository.isOrganizerOf(
+          registration.conferenceId, 
+          currentUser.id, 
+          tx
+        );
+        if (!isOwner) {
+          throw new UnauthorizedError("You do not have permission to manage this event's roster.");
+        }
+      }
 
-    // 5. Atomic Persistence
-    await this.registrationRepository.save(registration);
+      // Temporal guard
+      const conference = await this.conferenceRepository.findById(registration.conferenceId, tx);
+      if (!conference.isCheckInWindowOpen()) {
+        throw new BusinessRuleValidationError(
+          `Check-in is only available from ${conference.checkInOpensAt} to ${conference.checkInClosesAt}`
+        );
+      }
 
-    return {
-      success: true,
-      message: "Check-in successful.",
-      attendeeId: registration.userId,
-      checkedInAt: registration.checkedInAt
-    };
+      // Idempotent domain mutation
+      const wasAlreadyCheckedIn = registration.isCheckedIn();
+      registration.checkIn({ conference, checkedInBy: currentUser.id });
+
+      await this.registrationRepository.update(registration, tx);
+      await this.outboxRepository.saveMany(registration.pullDomainEvents(), tx);
+
+      return registration; // Return entity, not HTTP payload
+    });
   }
 }
