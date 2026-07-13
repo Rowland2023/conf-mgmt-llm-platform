@@ -1,81 +1,151 @@
 // src/modules/Event Schedule/domain/entities/event.entities.js
-import { randomUUID } from "crypto";
 
-export class Event {
+import { Entity } from "../../../../Shared/domain/entity.js";
+import { DomainInvariantError } from "../../../../Shared/errors/DomainErrors.js";
+import { EventScheduled } from "../events/EventScheduled.js";
+import { EventCancelled } from "../events/EventCancelled.js";
+import { EventRescheduled } from "../events/EventRescheduled.js";
+
+export const EVENT_STATUS = Object.freeze({
+  DRAFT: "Draft",
+  SCHEDULED: "Scheduled", 
+  IN_PROGRESS: "InProgress",
+  COMPLETED: "Completed",
+  CANCELLED: "Cancelled",
+});
+
+export class Event extends Entity {
   constructor({
-    id = randomUUID(),
+    id,
     title,
     roomID,
-    startTime,
-    endTime,
-    status = "Scheduled",
+    organizerId, // who owns this
+    startTime, // ISO string, always UTC
+    endTime,   // ISO string, always UTC
+    status = EVENT_STATUS.DRAFT,
+    version = 0, // for optimistic locking
   }) {
-    this.id = id;
+    super(id);
     this.title = title;
     this.roomID = roomID;
-    this.startTime = startTime;
-    this.endTime = endTime;
+    this.organizerId = organizerId;
+    this.startTime = startTime; // store as ISO string
+    this.endTime = endTime;     // store as ISO string  
     this.status = status;
-
-    // 👉 ADD THIS: Crucial for your Transactional Outbox!
-    this.domainEvents = []; 
+    this.version = version;
   }
 
-  static create({ title, roomID, startTime, endTime }) {
-    if (!title?.trim()) {
-      throw new Error("Title is required");
-    }
-    if (startTime >= endTime) {
-      throw new Error("Start time must be before end time");
-    }
+  static create({ title, roomID, organizerId, startTime, endTime }, { correlationId = null } = {}) {
+    if (!title?.trim()) throw new DomainInvariantError("Event title is required.");
+    if (!roomID) throw new DomainInvariantError("Room ID is required.");
+    if (!organizerId) throw new DomainInvariantError("Organizer ID is required.");
+    
+    const parsedStart = new Date(startTime);
+    const parsedEnd = new Date(endTime);
+    const now = new Date();
 
-    const event = new Event({ title, roomID, startTime, endTime });
+    if (Number.isNaN(parsedStart.getTime())) throw new DomainInvariantError("Invalid startTime.");
+    if (Number.isNaN(parsedEnd.getTime())) throw new DomainInvariantError("Invalid endTime.");
+    if (parsedStart >= parsedEnd) throw new DomainInvariantError("Start must be before end.");
+    if (parsedStart <= now) throw new DomainInvariantError("Cannot schedule in the past.");
 
-    // 👉 ADD THIS: Record that the event was created
-    event.domainEvents.push({
-      type: "EventCreated",
-      payload: { eventId: event.id, title, roomID, startTime, endTime }
+    const event = new Event({ 
+      title: title.trim(), 
+      roomID, 
+      organizerId,
+      startTime: parsedStart.toISOString(),
+      endTime: parsedEnd.toISOString(),
+      status: EVENT_STATUS.SCHEDULED,
+      version: 0
     });
+
+    event.recordEvent(new EventScheduled({
+      eventId: event.id,
+      title: event.title,
+      roomId: event.roomID,
+      organizerId: event.organizerId,
+      startTime: event.startTime,
+      endTime: event.endTime,
+      correlationId
+    }));
 
     return event;
   }
 
-  cancel() {
-    if (this.status === "Cancelled") {
-      throw new Error("Event is already cancelled");
+  static fromPersistence(dbDoc) {
+    if (!dbDoc) return null;
+    
+    // Trust DB but still parse dates to validate integrity
+    const start = new Date(dbDoc.startTime);
+    const end = new Date(dbDoc.endTime);
+    if (start >= end) {
+      throw new DomainInvariantError(`Corrupt event ${dbDoc.id}: start time cannot be equal to or after end time.`);
     }
-
-    this.status = "Cancelled";
-
-    // 👉 ADD THIS: Record the cancellation event
-    this.domainEvents.push({
-      type: "EventCancelled",
-      payload: { eventId: this.id }
+    
+    return new Event({
+      id: dbDoc.id,
+      title: dbDoc.title,
+      roomID: dbDoc.roomID,
+      organizerId: dbDoc.organizerId,
+      startTime: dbDoc.startTime, // keep as ISO string from DB
+      endTime: dbDoc.endTime,
+      status: dbDoc.status,
+      version: dbDoc.version
     });
   }
 
-  reschedule({ startTime, endTime }) {
-    if (this.status === "Cancelled") {
-      throw new Error("Cannot reschedule a cancelled event");
+  cancel(reason = null, { cancelledBy, correlationId = null, causationId = null } = {}) {
+    if (this.status === EVENT_STATUS.CANCELLED) {
+      throw new DomainInvariantError("Event is already cancelled.");
     }
-    if (startTime >= endTime) {
-      throw new Error("Start time must be before end time");
+    if (new Date(this.startTime) <= new Date()) {
+      throw new DomainInvariantError("Cannot cancel past or in-progress events.");
+    }
+    if (!cancelledBy) {
+      throw new DomainInvariantError("cancelledBy is required for audit.");
     }
 
-    this.startTime = startTime;
-    this.endTime = endTime;
+    this.status = EVENT_STATUS.CANCELLED;
+    this.version += 1;
 
-    // 👉 ADD THIS: Record the rescheduling event
-    this.domainEvents.push({
-      type: "EventRescheduled",
-      payload: { eventId: this.id, startTime, endTime }
-    });
+    this.recordEvent(new EventCancelled({
+      eventId: this.id,
+      cancelledBy,
+      reason: reason || "Administrative cancellation",
+      correlationId,
+      causationId
+    }));
   }
 
-  // 👉 ADD THIS: Let the repository pull events out to save them to the outbox table
-  pullEvents() {
-    const events = [...this.domainEvents];
-    this.domainEvents = [];
-    return events;
+  reschedule({ startTime, endTime }, { correlationId = null, causationId = null } = {}) {
+    if (this.status === EVENT_STATUS.CANCELLED) {
+      throw new DomainInvariantError("Cannot reschedule a cancelled event.");
+    }
+
+    const parsedNewStart = new Date(startTime);
+    const parsedNewEnd = new Date(endTime);
+    const now = new Date();
+
+    if (Number.isNaN(parsedNewStart.getTime())) throw new DomainInvariantError("Invalid new startTime.");
+    if (Number.isNaN(parsedNewEnd.getTime())) throw new DomainInvariantError("Invalid new endTime.");
+    if (parsedNewStart >= parsedNewEnd) throw new DomainInvariantError("New startTime must be before new endTime.");
+    if (parsedNewStart <= now) throw new DomainInvariantError("Cannot reschedule an event into the past.");
+
+    const previousStartTime = this.startTime;
+    const previousEndTime = this.endTime;
+
+    this.startTime = parsedNewStart.toISOString();
+    this.endTime = parsedNewEnd.toISOString();
+    this.version += 1;
+
+    this.recordEvent(new EventRescheduled({
+      eventId: this.id,
+      previousStartTime,
+      previousEndTime,
+      newStartTime: this.startTime,
+      newEndTime: this.endTime,
+      correlationId,
+      causationId
+    }));
   }
 }

@@ -1,10 +1,11 @@
 // modules/payment/domain/events/PaymentCompletedEvent.js
+import { DomainEvent } from '../../../shared/domain/DomainEvent.js'; // Adjust path based on your layout
 import { ValidationError } from "../errors/PaymentErrors.js";
 
-export class PaymentCompletedEvent {
+export class PaymentCompletedEvent extends DomainEvent {
   constructor({
-    id,
-    paymentId,
+    id, // Passed to base class as eventId
+    paymentId, // Maps to aggregateId in the base class
     bookingId,
     tenantId,
     userId = null,
@@ -13,40 +14,35 @@ export class PaymentCompletedEvent {
     gateway,
     gatewayTransactionId,
     idempotencyKey,
-    paidAt = new Date()
+    paidAt = new Date(),
+    correlationId = null,
+    causationId = null
   }) {
-    // 1. Core Architectural Identity Guards
-    if (!id) throw new ValidationError("Event ID is required.");
-    if (!paymentId) throw new ValidationError("Payment aggregate ID is required.");
+    // 1. Pass core metadata up to the base class constructor
+    super({
+      eventName: 'payment.completed',
+      aggregateId: paymentId,
+      eventId: id, // Extracted and validated by the base DomainEvent
+      occurredAt: paidAt instanceof Date ? paidAt : new Date(paidAt),
+      correlationId,
+      causationId
+    });
+
+    // 2. Subclass Validation Guards (Business Integrity)
     if (!bookingId) throw new ValidationError("Booking ID is required.");
     if (!tenantId) throw new ValidationError("Tenant ID is required.");
-
-    // 2. Financial Integrity Guards (Strict Integers for Minor Units)
     if (!Number.isInteger(amount) || amount <= 0) {
       throw new ValidationError("Payment amount must be a positive integer in minor units.");
     }
     if (!/^[A-Z]{3}$/i.test(currency)) {
       throw new ValidationError("Invalid currency code format. Must be an ISO 3-letter string.");
     }
-
-    // 3. Operational Audit Guards
     if (!gateway) throw new ValidationError("Gateway identifier is required.");
     if (!gatewayTransactionId) throw new ValidationError("Gateway transaction reference ID is required.");
     if (!idempotencyKey) throw new ValidationError("Idempotency key is required.");
 
-    this.name = "PaymentCompletedEvent";
-    this.version = 1;
-
-    // Isolate cross-cutting architectural routing details
-    this.metadata = Object.freeze({
-      eventId: id,
-      aggregateId: paymentId,
-      aggregateType: "Payment",
-      occurredAt: paidAt instanceof Date ? paidAt : new Date(paidAt)
-    });
-
-    // Isolate pure contextual business data fields
-    this.payload = Object.freeze({
+    // 3. Populate subclass payload properties
+    this.payload = {
       paymentId,
       bookingId,
       tenantId,
@@ -56,21 +52,21 @@ export class PaymentCompletedEvent {
       gateway,
       gatewayTransactionId,
       idempotencyKey
-    });
+    };
 
-    Object.freeze(this);
+    // 4. Guarantee deep immutability using base utility
+    this.freezeEvent();
   }
 
   /**
-   * Serializes the domain event into a standard data structure safely.
-   * Keeps metadata and payload structurally separated to avoid root property conflicts.
+   * Overrides/Standardizes JSON structure across all events
    */
   toJSON() {
     return {
-      eventName: this.name,
-      version: this.version,
-      metadata: { ...this.metadata },
-      payload: { ...this.payload }
+      eventName: this.metadata.eventName,
+      version: this.metadata.eventVersion,
+      metadata: this.metadata,
+      payload: this.payload
     };
   }
 }

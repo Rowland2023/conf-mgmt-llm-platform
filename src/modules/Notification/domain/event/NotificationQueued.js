@@ -1,96 +1,55 @@
-import { randomUUID } from "crypto";
+// modules/notification/domain/events/NotificationQueued.js
+import { DomainEvent } from "../../../shared/domain/DomainEvent.js";
 
-/**
- * A highly robust, cyclic-safe deep freeze implementation.
- * Eliminates side-channel mutations across downstream infrastructure handlers.
- * 
- * @param {Object} obj - The object shell to recursively freeze
- * @param {WeakSet} [seen] - Memory tracking set to prevent infinite loops on cycles
- * @returns {Object} The deeply frozen immutable object reference
- */
-function deepFreeze(obj, seen = new WeakSet()) {
-    if (obj === null || typeof obj !== "object" || Object.isFrozen(obj)) {
-        return obj;
+const ALLOWED_CHANNELS = new Set(['email', 'sms', 'push', 'in_app']);
+
+export class NotificationQueued extends DomainEvent {
+  constructor({
+    notificationId,
+    userId = null,
+    recipient,
+    channel,
+    metadata = {},
+    occurredAt = new Date(),
+    correlationId = null,
+    causationId = null
+  }) {
+    if (!notificationId) {
+      throw new Error("Event Invariant Error: 'notificationId' required.");
     }
-    
-    if (seen.has(obj)) {
-        return obj;
+    if (!recipient) {
+      throw new Error("Event Invariant Error: 'recipient' required.");
     }
-    seen.add(obj);
-
-    // Freeze current node layer
-    Object.freeze(obj);
-
-    // Recursively handle nested object properties, including hidden descriptor keys
-    const propertyNames = Object.getOwnPropertyNames(obj);
-    for (let i = 0; i < propertyNames.length; i++) {
-        const key = propertyNames[i];
-        const value = obj[key];
-        if (value !== null && (typeof value === "object" || typeof value === "function")) {
-            deepFreeze(value, seen);
-        }
+    if (!ALLOWED_CHANNELS.has(channel)) {
+      throw new Error(`Event Invariant Error: Invalid channel '${channel}'.`);
     }
 
-    return obj;
-}
+    super({
+      eventName: "notification.queued",
+      eventVersion: 1,
+      aggregateId: notificationId,
+      occurredAt,
+      correlationId,
+      causationId
+    });
 
-/**
- * Immutable Domain Event representing a queued system notification.
- */
-export class NotificationQueued {
-    constructor({
-        notificationId,
-        userId = null,
-        recipient,
-        channel,
-        metadata = {}
-    }) {
-        // 1. Fail-Fast Guard Clauses (Enforcing Domain Invariants)
-        if (!notificationId) {
-            throw new Error("Event Invariant Error: 'notificationId' is a strictly required identifier.");
-        }
-        if (!recipient) {
-            throw new Error("Event Invariant Error: 'recipient' reference data must be provided.");
-        }
-        if (!channel) {
-            throw new Error("Event Invariant Error: A target transmission 'channel' is required.");
-        }
+    this.payload = Object.freeze({
+      notificationId,
+      userId,
+      recipient,
+      channel,
+      metadata: Object.freeze(structuredClone(metadata))
+    });
 
-        // 2. Standard Event Envelop/Metadata Configuration
-        this.id = randomUUID();
-        this.aggregateId = notificationId;
-        this.aggregateType = "Notification";
-        this.type = "NotificationQueued";
-        this.occurredAt = new Date().toISOString();
+    this.freezeEvent();
+  }
 
-        // 3. Isolated Payload Formulation & Preservation
-        this.payload = deepFreeze({
-            notificationId,
-            userId,
-            recipient,
-            channel,
-            metadata: { ...metadata } // Shallow clone before deep freeze to avoid modifying caller state
-        });
-
-        // 4. Sealed Object Pass: Secure outer shell properties before final recursive deep freeze
-        Object.freeze(this);
-        return deepFreeze(this);
-    }
-
-    /**
-     * Standard serialization interceptor.
-     * Guarantees a reliable, unpolluted data structure when stringified into your Outbox database log.
-     * 
-     * @returns {Object} Plain object payload structure
-     */
-    toJSON() {
-        return {
-            id: this.id,
-            aggregateId: this.aggregateId,
-            aggregateType: this.aggregateType,
-            type: this.type,
-            occurredAt: this.occurredAt,
-            payload: this.payload
-        };
-    }
+  static from(persisted) {
+    return new NotificationQueued({
+      ...persisted.payload,
+      occurredAt: new Date(persisted.metadata.occurredAt),
+      correlationId: persisted.metadata.correlationId,
+      causationId: persisted.metadata.causationId
+    });
+  }
 }

@@ -1,64 +1,62 @@
-import crypto from "crypto";
+import { DomainEvent } from "../../../../Shared/domain/DomainEvent.js";
+import { DomainInvariantError } from "../../../../Shared/errors/DomainErrors.js";
 
-/**
- * Raised when a new event has been successfully scheduled.
- * Pure Immutable Domain Event.
- * 
- * Implements strict structural timestamp guards to enforce structural safety
- * across application, database, and message bus boundaries.
- */
-export class EventScheduled {
-    /**
-     * @param {Object} data
-     * @param {string} data.eventId - Aggregate Root Identifier reference
-     * @param {string} data.title - Title name descriptor of the event
-     * @param {string} data.roomId - Target room resource allocation key
-     * @param {Date|string} data.startTime - Cron start timestamp boundary
-     * @param {Date|string} data.endTime - Cron end timestamp boundary
-     * @param {string|null} [data.correlationId=null] - Distributed tracing identifier tracking transaction trees
-     * @param {Date|string} [data.occurredAt] - Explicit creation date hook
-     * @param {string} [data.id] - Optional override used solely by factory hydration layers
-     */
+const MAX_EVENT_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const ISO_UTC_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+export class EventScheduled extends DomainEvent {
     constructor({
         eventId,
         title,
         roomId,
-        startTime,
-        endTime,
+        startTime, // must be ISO-8601 UTC: 2026-08-01T09:00:00Z
+        endTime,   // must be ISO-8601 UTC
+        occurredAt, // required: decision time
         correlationId = null,
-        occurredAt = new Date(),
-        id = null
+        causationId = null
     }) {
-        if (!eventId) throw new Error("EventScheduled: initialization missing parameter [eventId].");
-        if (!title) throw new Error("EventScheduled: initialization missing parameter [title].");
-        if (!roomId) throw new Error("EventScheduled: initialization missing parameter [roomId].");
-        if (!startTime) throw new Error("EventScheduled: initialization missing parameter [startTime].");
-        if (!endTime) throw new Error("EventScheduled: initialization missing parameter [endTime].");
+        if (!eventId) throw new DomainInvariantError("EventScheduled: eventId is required.");
+        if (!title) throw new DomainInvariantError("EventScheduled: title is required.");
+        if (!roomId) throw new DomainInvariantError("EventScheduled: roomId is required.");
+        if (!startTime) throw new DomainInvariantError("EventScheduled: startTime is required.");
+        if (!endTime) throw new DomainInvariantError("EventScheduled: endTime is required.");
+        if (!occurredAt) throw new DomainInvariantError("EventScheduled: occurredAt is required.");
 
-        // 1. Explicit Timestamp Parsing Safeguards
-        const parsedStart = startTime instanceof Date ? startTime : new Date(startTime);
-        const parsedEnd = endTime instanceof Date ? endTime : new Date(endTime);
-        const parsedOccurred = occurredAt instanceof Date ? occurredAt : new Date(occurredAt);
-
-        if (Number.isNaN(parsedStart.getTime())) {
-            throw new Error(`EventScheduled: Invalid timestamp payload evaluated for [startTime]: ${startTime}`);
+        // Force UTC to prevent timezone bugs
+        if (!ISO_UTC_REGEX.test(startTime)) {
+            throw new DomainInvariantError("EventScheduled: startTime must be ISO-8601 UTC, e.g. 2026-08-01T09:00:00Z");
         }
-        if (Number.isNaN(parsedEnd.getTime())) {
-            throw new Error(`EventScheduled: Invalid timestamp payload evaluated for [endTime]: ${endTime}`);
-        }
-        if (Number.isNaN(parsedOccurred.getTime())) {
-            throw new Error(`EventScheduled: Invalid timestamp payload evaluated for [occurredAt]: ${occurredAt}`);
+        if (!ISO_UTC_REGEX.test(endTime)) {
+            throw new DomainInvariantError("EventScheduled: endTime must be ISO-8601 UTC");
         }
 
-        // 2. State Mapping Assignments
-        this.id = id || crypto.randomUUID();
-        this.aggregateId = eventId;
-        this.aggregateType = "Event";
-        this.type = "EventScheduled";
-        this.occurredAt = parsedOccurred.toISOString();
-        this.correlationId = correlationId || null;
+        const parsedStart = new Date(startTime);
+        const parsedEnd = new Date(endTime);
+        const parsedOccurred = new Date(occurredAt);
 
-        this.payload = deepFreeze({
+        if (Number.isNaN(parsedStart.getTime())) throw new DomainInvariantError("EventScheduled: invalid startTime");
+        if (Number.isNaN(parsedEnd.getTime())) throw new DomainInvariantError("EventScheduled: invalid endTime");
+        if (Number.isNaN(parsedOccurred.getTime())) throw new DomainInvariantError("EventScheduled: invalid occurredAt");
+
+        if (parsedStart >= parsedEnd) {
+            throw new DomainInvariantError("EventScheduled: startTime must be before endTime.");
+        }
+
+        const duration = parsedEnd - parsedStart;
+        if (duration > MAX_EVENT_DURATION_MS) {
+            throw new DomainInvariantError(`EventScheduled: duration exceeds max ${MAX_EVENT_DURATION_MS}ms`);
+        }
+
+        super({
+            eventName: "event.scheduled",
+            eventVersion: 1,
+            aggregateId: eventId,
+            occurredAt: parsedOccurred,
+            correlationId,
+            causationId
+        });
+
+        this.payload = Object.freeze({
             eventId,
             title,
             roomId,
@@ -66,76 +64,26 @@ export class EventScheduled {
             endTime: parsedEnd.toISOString()
         });
 
-        Object.freeze(this);
+        this.freezeEvent();
     }
 
-    /**
-     * Standard contract serializer method.
-     * Maps internal structures to raw JSON primitive collections safely.
-     * 
-     * @returns {Object}
-     */
-    toJSON() {
-        return {
-            id: this.id,
-            aggregateId: this.aggregateId,
-            aggregateType: this.aggregateType,
-            type: this.type,
-            occurredAt: this.occurredAt,
-            correlationId: this.correlationId,
-            payload: this.payload
-        };
-    }
-
-    /**
-     * Static Rehydration Factory Engine.
-     * Reconstructs historical instances out of saved storage arrays without generating new IDs.
-     * Handles flexible structural matching for both root level keys and internal payloads.
-     * 
-     * @param {Object} json - Document map pulled out of the infrastructure database.
-     * @returns {EventScheduled}
-     */
-    static fromJSON(json) {
-        if (!json || !json.payload) {
-            throw new Error("EventScheduled: Cannot rehydrate historical snapshot from empty object signatures.");
+    static from(persisted) {
+        if (!persisted?.payload) {
+            throw new DomainInvariantError("EventScheduled: Cannot rehydrate from empty data.");
         }
-        
-        // Defensive extract normalization handling both raw construction variants and event store schemas smoothly
-        const extractedEventId = json.aggregateId || json.payload.eventId;
+        if (persisted.aggregateId !== persisted.payload.eventId) {
+            throw new DomainInvariantError("EventScheduled: aggregateId mismatch during rehydration.");
+        }
         
         return new EventScheduled({
-            id: json.id,
-            eventId: extractedEventId,
-            title: json.payload.title,
-            roomId: json.payload.roomId,
-            startTime: json.payload.startTime,
-            endTime: json.payload.endTime,
-            correlationId: json.correlationId,
-            occurredAt: json.occurredAt
+            eventId: persisted.payload.eventId,
+            title: persisted.payload.title,
+            roomId: persisted.payload.roomId,
+            startTime: persisted.payload.startTime,
+            endTime: persisted.payload.endTime,
+            occurredAt: persisted.metadata.occurredAt,
+            correlationId: persisted.metadata.correlationId,
+            causationId: persisted.metadata.causationId
         });
     }
-}
-
-/**
- * Deep freezes flat object properties.
- * Primitives are protected; nested objects are scanned recursively.
- */
-function deepFreeze(obj) {
-    if (!obj || typeof obj !== "object") return obj;
-
-    Object.freeze(obj);
-
-    for (const key of Object.keys(obj)) {
-        const value = obj[key];
-
-        if (
-            value &&
-            typeof value === "object" &&
-            !Object.isFrozen(value)
-        ) {
-            deepFreeze(value);
-        }
-    }
-
-    return obj;
 }

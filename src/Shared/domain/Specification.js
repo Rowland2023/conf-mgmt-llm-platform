@@ -1,5 +1,12 @@
 export class Specification {
+  constructor() {
+    if (this.constructor === Specification) {
+      throw new Error('Specification is an abstract base and cannot be instantiated directly.');
+    }
+  }
+
   /**
+   * Evaluate the business rule against an in-memory object instance.
    * @param {any} candidate 
    * @returns {boolean}
    */
@@ -8,6 +15,7 @@ export class Specification {
   }
 
   /**
+   * Logical AND composite operation
    * @param {Specification} other 
    * @returns {Specification}
    */
@@ -16,6 +24,7 @@ export class Specification {
   }
 
   /**
+   * Logical OR composite operation
    * @param {Specification} other 
    * @returns {Specification}
    */
@@ -24,19 +33,11 @@ export class Specification {
   }
 
   /**
+   * Logical NOT negation operation
    * @returns {Specification}
    */
   not() {
     return new NegationSpecification(this);
-  }
-
-  /**
-   * Optional: Translate to SQL WHERE clause
-   * @param {string} alias 
-   * @returns {string}
-   */
-  toSql(alias = 't') {
-    throw new Error(`toSql() not implemented for ${this.constructor.name}`);
   }
 }
 
@@ -46,11 +47,9 @@ class ConjunctionSpecification extends Specification {
     this.left = left;
     this.right = right;
   }
+  
   isSatisfiedBy(candidate) {
     return this.left.isSatisfiedBy(candidate) && this.right.isSatisfiedBy(candidate);
-  }
-  toSql(alias) {
-    return `(${this.left.toSql(alias)} AND ${this.right.toSql(alias)})`;
   }
 }
 
@@ -60,11 +59,9 @@ class DisjunctionSpecification extends Specification {
     this.left = left;
     this.right = right;
   }
+  
   isSatisfiedBy(candidate) {
     return this.left.isSatisfiedBy(candidate) || this.right.isSatisfiedBy(candidate);
-  }
-  toSql(alias) {
-    return `(${this.left.toSql(alias)} OR ${this.right.toSql(alias)})`;
   }
 }
 
@@ -73,10 +70,8 @@ class NegationSpecification extends Specification {
     super();
     this.spec = spec;
   }
+  
   isSatisfiedBy(candidate) {
     return !this.spec.isSatisfiedBy(candidate);
-  }
-  toSql(alias) {
-    return `NOT (${this.spec.toSql(alias)})`;
   }
 }

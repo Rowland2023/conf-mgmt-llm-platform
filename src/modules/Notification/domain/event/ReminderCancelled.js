@@ -1,90 +1,67 @@
-import { randomUUID } from "crypto";
+import { DomainEvent } from "../../../../Shared/domain/DomainEvent.js";
 import { ValidationError } from "../../../../Shared/errors/ApplicationErrors.js";
 
-/**
- * Bottom-up deep-freezes an object graph to guarantee event immutability.
- * Uses Reflect.ownKeys to catch both string names and internal Symbol markers safely.
- */
-function deepFreeze(obj, seen = new WeakSet()) {
-    if (obj === null || typeof obj !== "object" || Object.isFrozen(obj)) {
-        return obj;
-    }
+const CANCELLATION_REASONS = new Set([
+  'user_request', 
+  'conference_cancelled', 
+  'admin_action',
+  'system_policy'
+]);
 
-    if (seen.has(obj)) {
-        return obj;
-    }
-
-    seen.add(obj);
-
-    // Recursively freeze child properties first to ensure child stability before locking the parent node
-    for (const key of Reflect.ownKeys(obj)) {
-        const value = obj[key];
-        if (value !== null && typeof value === "object") {
-            deepFreeze(value, seen);
-        }
-    }
-
-    return Object.freeze(obj);
-}
-
-export class ReminderCancelled {
+export class ReminderCancelled extends DomainEvent {
     constructor({
         notificationId,
         conferenceId,
-        cancelledBy = null,
-        reason = null,
-        cancelledAt = new Date(),
-        correlationId = null
+        cancelledBy = 'system',
+        reason,
+        cancelledAt, // required - no default
+        correlationId = null,
+        causationId = null
     }) {
-        // 1. Enforce business invariants using the uniform error schema
         if (!notificationId) {
             throw new ValidationError("ReminderCancelled: notificationId is required.");
         }
-
         if (!conferenceId) {
             throw new ValidationError("ReminderCancelled: conferenceId is required.");
+        }
+        if (!cancelledAt) {
+            throw new ValidationError("ReminderCancelled: cancelledAt is required.");
+        }
+        if (reason && !CANCELLATION_REASONS.has(reason)) {
+            throw new ValidationError(`ReminderCancelled: invalid reason '${reason}'.`);
         }
 
         const timestamp = new Date(cancelledAt);
         if (Number.isNaN(timestamp.getTime())) {
-            throw new ValidationError("ReminderCancelled: cancelledAt must be a valid, parsable date configuration.");
+            throw new ValidationError("ReminderCancelled: cancelledAt must be valid date.");
         }
 
-        // 2. Structured Outbox Envelope Layout Metadata
-        this.id = randomUUID();
-        this.aggregateId = notificationId;
-        this.aggregateType = "Notification";
-        this.type = "ReminderCancelled";
-        this.occurredAt = timestamp.toISOString();
-        this.correlationId = correlationId || null;
+        super({
+            eventName: "reminder.cancelled",
+            eventVersion: 1,
+            aggregateId: notificationId,
+            occurredAt: timestamp,
+            correlationId,
+            causationId
+        });
 
-        // 3. Domain Event Payload Shell
-        this.payload = {
+        this.payload = Object.freeze({
             notificationId,
             conferenceId,
             cancelledBy,
             reason,
             cancelledAt: timestamp.toISOString()
-        };
+        });
 
-        // 4. Single atomic bottom-up deep freeze pass
-        // Freezes this.payload first, then locks the outer instance container safely
-        deepFreeze(this);
+        this.freezeEvent();
     }
 
-    /**
-     * Serializes the immutable domain event into a plain object map for outbox 
-     * database insertion and message streaming topologies (Kafka / RabbitMQ).
-     */
-    toJSON() {
-        return {
-            id: this.id,
-            aggregateId: this.aggregateId,
-            aggregateType: this.aggregateType,
-            type: this.type,
-            occurredAt: this.occurredAt,
-            correlationId: this.correlationId,
-            payload: this.payload
-        };
+    static from(persisted) {
+        return new ReminderCancelled({
+            ...persisted.payload,
+            cancelledAt: persisted.payload.cancelledAt,
+            correlationId: persisted.metadata.correlationId,
+            causationId: persisted.metadata.causationId
+        });
     }
 }

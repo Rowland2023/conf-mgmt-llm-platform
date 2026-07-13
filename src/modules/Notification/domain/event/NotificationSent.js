@@ -1,88 +1,73 @@
-import { randomUUID } from "crypto";
-import { ValidationError } from "../../../../Shared/errors/ApplicationErrors.js";
+// src/modules/notification/domain/events/NotificationSent.js
+import { DomainEvent } from "../../../../Shared/domain/DomainEvent.js"; 
+import { ValidationError } from "../../../../Shared/domain/errors/DomainError.js";
 
-/**
- * Bottom-up deep-freezes an object graph to guarantee runtime event immutability.
- * Uses Reflect.ownKeys to safely map standard names as well as internal Symbol markers.
- */
-function deepFreeze(obj, seen = new WeakSet()) {
-    if (obj === null || typeof obj !== "object" || Object.isFrozen(obj)) {
-        return obj;
-    }
+const ALLOWED_CHANNELS = new Set(['email', 'sms', 'push', 'in_app']);
 
-    if (seen.has(obj)) {
-        return obj;
-    }
-
-    seen.add(obj);
-
-    // Recursively freeze child properties first to ensure child stability before locking the parent node
-    for (const key of Reflect.ownKeys(obj)) {
-        const value = obj[key];
-        if (value !== null && typeof value === "object") {
-            deepFreeze(value, seen);
-        }
-    }
-
-    return Object.freeze(obj);
-}
-
-export class NotificationSent {
+export class NotificationSent extends DomainEvent {
     constructor({
         notificationId,
         userId = null,
-        conferenceId = null,
+        contextType = null, // 'conference', 'payment', 'order' etc
+        contextId = null,
         channel,
-        sentAt = new Date(),
-        correlationId = null
+        sentAt, // required - no default
+        providerMessageId = null, // Paystack/Termii message ID for tracing
+        correlationId = null,
+        causationId = null
     }) {
-        // Assert domain boundaries using your uniform error schema
+        // 1. Core Domain Boundary Guards
         if (!notificationId) {
             throw new ValidationError("NotificationSent: notificationId is required.");
         }
-
         if (!channel) {
             throw new ValidationError("NotificationSent: channel is required.");
+        }
+        if (!ALLOWED_CHANNELS.has(channel)) {
+            throw new ValidationError(`NotificationSent: Invalid channel '${channel}'. Allowed: ${[...ALLOWED_CHANNELS].join(', ')}`);
+        }
+        if (!sentAt) {
+            throw new ValidationError("NotificationSent: sentAt is required.");
         }
 
         const timestamp = new Date(sentAt);
         if (Number.isNaN(timestamp.getTime())) {
-            throw new ValidationError("NotificationSent: sentAt must be a valid, parsable date configuration.");
+            throw new ValidationError("NotificationSent: sentAt must be a valid date.");
         }
 
-        // Structural Outbox Metadata
-        this.id = randomUUID();
-        this.aggregateId = notificationId;
-        this.aggregateType = "Notification";
-        this.type = "NotificationSent";
-        this.occurredAt = timestamp.toISOString();
-        this.correlationId = correlationId || null;
+        // 2. Delegate Structural Routing & Envelope Metadata to Parent
+        super({
+            eventName: "notification.sent",
+            eventVersion: 1, // Explicit structural versioning
+            aggregateId: notificationId,
+            occurredAt: timestamp, // Real domain time mapped from provider receipt
+            correlationId,
+            causationId
+        });
 
-        // Domain Specific Payload Shell
+        // 3. Formulate Domain Business Payload
         this.payload = {
             notificationId,
             userId,
-            conferenceId,
+            contextType,
+            contextId,
             channel,
-            sentAt: timestamp.toISOString()
+            sentAt: timestamp.toISOString(),
+            providerMessageId
         };
 
-        // Single atomic top-down deep freeze operation
-        deepFreeze(this);
+        // 4. Atomic deep-freeze to protect runtime telemetry channels
+        this.freezeEvent();
     }
 
     /**
-     * Provides a clean structured plain object format for database serialization 
-     * and message brokers (e.g., RabbitMQ, Kafka).
+     * Plain Object serialization mapping for DB Outbox logging and Event brokers.
      */
     toJSON() {
         return {
-            id: this.id,
-            aggregateId: this.aggregateId,
-            aggregateType: this.aggregateType,
-            type: this.type,
-            occurredAt: this.occurredAt,
-            correlationId: this.correlationId,
+            eventName: this.metadata.eventName,
+            version: this.metadata.eventVersion,
+            metadata: this.metadata,
             payload: this.payload
         };
     }

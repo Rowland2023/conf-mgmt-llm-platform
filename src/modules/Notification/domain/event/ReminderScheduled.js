@@ -1,42 +1,66 @@
-// src/modules/notification/domain/events/ReminderScheduled.js
-import { randomUUID } from "crypto";
+import { DomainEvent } from "../../../../Shared/domain/DomainEvent.js";
+import { ValidationError } from "../../../../Shared/errors/ApplicationErrors.js";
 
-function deepFreeze(obj, seen = new WeakSet()) {
-  if (obj === null || typeof obj!== "object" || Object.isFrozen(obj)) return obj;
-  if (seen.has(obj)) return obj;
-  seen.add(obj);
-  Object.freeze(obj);
-  Object.getOwnPropertyNames(obj).forEach(key => deepFreeze(obj[key], seen));
-  return obj;
-}
-
-export class ReminderScheduled {
-  constructor({ notificationId, conferenceId, userId, scheduledFor, correlationId, causationId, now = new Date() }) {
-    if (!notificationId) throw new Error("notificationId required");
-    if (!conferenceId) throw new Error("conferenceId required");
-    if (!userId) throw new Error("userId required");
-    if (!scheduledFor) throw new Error("scheduledFor required");
+export class ReminderScheduled extends DomainEvent {
+  constructor({ 
+    notificationId, 
+    contextType, // 'conference', 'payment', 'escrow'
+    contextId,
+    userId, 
+    scheduledFor,
+    templateKey, // 'funds_released_t+1d', 'escrow_timeout_warning'
+    decidedAt, // required: when the decision was made
+    correlationId = null, 
+    causationId = null,
+  }) {
+    if (!notificationId) throw new ValidationError("ReminderScheduled: notificationId is required.");
+    if (!contextType) throw new ValidationError("ReminderScheduled: contextType is required.");
+    if (!contextId) throw new ValidationError("ReminderScheduled: contextId is required.");
+    if (!userId) throw new ValidationError("ReminderScheduled: userId is required.");
+    if (!scheduledFor) throw new ValidationError("ReminderScheduled: scheduledFor is required.");
+    if (!templateKey) throw new ValidationError("ReminderScheduled: templateKey is required.");
+    if (!decidedAt) throw new ValidationError("ReminderScheduled: decidedAt is required.");
 
     const schedDate = new Date(scheduledFor);
-    if (isNaN(schedDate.getTime())) throw new Error("scheduledFor must be valid date");
-    if (schedDate <= now) throw new Error("scheduledFor must be future");
+    if (Number.isNaN(schedDate.getTime())) {
+      throw new ValidationError("ReminderScheduled: scheduledFor must be valid date.");
+    }
+    
+    const decidedAtDate = new Date(decidedAt);
+    if (Number.isNaN(decidedAtDate.getTime())) {
+      throw new ValidationError("ReminderScheduled: decidedAt must be valid date.");
+    }
 
-    this.id = randomUUID();
-    this.aggregateId = notificationId;
-    this.aggregateType = "Notification";
-    this.type = "ReminderScheduled";
-    this.version = 1;
-    this.occurredAt = new Date().toISOString();
-    this.correlationId = correlationId || null;
-    this.causationId = causationId || null;
+    // Don't validate scheduledFor > decidedAt here. That's a command/aggregate rule.
+    // Events record what happened, even if it was a bad decision.
 
-    this.payload = deepFreeze({
-      notificationId,
-      conferenceId,
-      userId, // NO recipient
-      scheduledFor: schedDate.toISOString()
+    super({
+      eventName: "reminder.scheduled",
+      eventVersion: 1,
+      aggregateId: notificationId,
+      occurredAt: decidedAtDate, // decision time, not processing time
+      correlationId,
+      causationId
     });
 
-    return deepFreeze(this);
+    this.payload = Object.freeze({
+      notificationId,
+      contextType,
+      contextId,
+      userId,
+      scheduledFor: schedDate.toISOString(),
+      templateKey
+    });
+
+    this.freezeEvent();
+  }
+
+  static from(persisted) {
+    return new ReminderScheduled({
+      ...persisted.payload,
+      decidedAt: persisted.metadata.occurredAt,
+      correlationId: persisted.metadata.correlationId,
+      causationId: persisted.metadata.causationId
+    });
   }
 }
