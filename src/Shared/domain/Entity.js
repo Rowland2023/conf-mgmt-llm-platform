@@ -1,39 +1,77 @@
 import { DomainValidationError } from '../errors/DomainErrors.js';
+import { DomainEvent } from './DomainEvent.js'; // add this
 
 export class Entity {
-  /**
-   * @param {string} id - The unique identifier of the entity
-   */
-  constructor(id) {
-    if (!id || typeof id!== 'string' || id.trim() === '') {
+  #domainEvents = [];
+
+  constructor(id, version = 0) {
+    if (new.target === Entity) {
+      throw new Error('Entity is abstract and cannot be instantiated directly');
+    }
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       throw new DomainValidationError('Entity must have a non-empty string ID');
     }
-    this._id = id.trim();
+    if (!Number.isInteger(version) || version < 0) {
+      throw new DomainValidationError('Entity version must be a non-negative integer');
+    }
+
+    Object.defineProperty(this, '_id', { 
+      value: id.trim(), 
+      writable: false, 
+      enumerable: true,
+      configurable: false 
+    });
+    
+    Object.defineProperty(this, '_version', { 
+      value: version, 
+      writable: true,
+      enumerable: true,
+      configurable: false 
+    });
   }
 
-  get id() {
-    return this._id;
+  get id() { return this._id; }
+  get version() { return this._version; }
+
+  recordEvent(event) {
+    if (!event) return;
+    if (!(event instanceof DomainEvent)) {
+      throw new Error('recordEvent only accepts DomainEvent instances');
+    }
+    this.#domainEvents.push(event);
   }
 
-  /**
-   * Entities are compared by identity: same type + same ID.
-   * @param {Entity} [other]
-   * @returns {boolean}
-   */
+  pullEvents() {
+    const events = [...this.#domainEvents];
+    this.#domainEvents = [];
+    return Object.freeze(events);
+  }
+
+  incrementVersion() {
+    this._version += 1;
+    return this; // allow chaining
+  }
+
   equals(other) {
     if (other === null || other === undefined) return false;
-    if (this.constructor!== other.constructor) return false;
+    if (!(other instanceof this.constructor)) return false;
     return this.id === other.id;
   }
 
-  /**
-   * For use in Maps/Sets or custom collections.
-   */
-  hashCode() {
-    return `${this.constructor.name}:${this.id}`;
+  toString() {
+    return `${this.constructor.name}(id=${this.id}, v=${this.version})`;
   }
 
-  toString() {
-    return `${this.constructor.name}(id=${this.id})`;
+  get [Symbol.toPrimitive]() {
+    return (hint) => {
+      if (hint === 'string') return this.id;
+      if (hint === 'number') return NaN;
+      return this.id;
+    };
+  }
+
+  static getMapKey(entity) {
+    if (!entity || !entity.id) return null;
+    return `${entity.constructor.name}:${entity.id}`;
   }
 }

@@ -1,9 +1,12 @@
+// modules/payment/domain/events/PaymentRefundedEvent.js
+
+import { DomainEvent } from '../../../shared/domain/DomainEvent.js'; // Adjust path to fit your directory structure
 import { ValidationError } from "../errors/PaymentErrors.js";
 
-export class PaymentRefundedEvent {
+export class PaymentRefundedEvent extends DomainEvent {
   constructor({
-    id,
-    paymentId,
+    id,                  // Passed to base class as eventId
+    paymentId,           // Maps to aggregateId in the base class
     bookingId,
     tenantId = null,
     amountRefunded,
@@ -11,14 +14,24 @@ export class PaymentRefundedEvent {
     currency,
     status,
     processedBy,
-    occurredAt = new Date()
+    occurredAt = new Date(),
+    correlationId = null,
+    causationId = null   // Keeps tracing context open for downstream logging
   }) {
-    // Structural Integrity Guards
-    if (!id) throw new ValidationError("Event ID required.");
-    if (!paymentId) throw new ValidationError("Payment aggregate ID required.");
+    // 1. Pass core metadata up to the base class constructor
+    super({
+      eventName: 'payment.refunded',
+      aggregateId: paymentId,
+      eventId: id,
+      occurredAt: occurredAt instanceof Date ? occurredAt : new Date(occurredAt),
+      correlationId,
+      causationId
+    });
+
+    // 2. Subclass-Specific Structural Guards
     if (!bookingId) throw new ValidationError("Booking ID required.");
 
-    // Core Financial Integrity Guards (Minor Units / Integers)
+    // 3. Core Financial Integrity Guards (Minor Units / Integers)
     if (!Number.isInteger(amountRefunded) || amountRefunded <= 0) {
       throw new ValidationError("Refund amount must be a positive integer in minor units.");
     }
@@ -26,7 +39,7 @@ export class PaymentRefundedEvent {
       throw new ValidationError("Remaining balance must be a non-negative integer in minor units.");
     }
 
-    // State & Vocabulary Guards
+    // 4. State & Vocabulary Guards
     if (!["PARTIALLY_REFUNDED", "REFUNDED"].includes(status)) {
       throw new ValidationError("Invalid refund state.");
     }
@@ -34,18 +47,8 @@ export class PaymentRefundedEvent {
       throw new ValidationError("Invalid currency code.");
     }
 
-    this.name = "PaymentRefundedEvent";
-    this.version = 1;
-
-    // Enforce deep immutability across event structural boundaries
-    this.metadata = Object.freeze({
-      eventId: id,
-      aggregateId: paymentId,
-      aggregateType: "Payment",
-      occurredAt: occurredAt instanceof Date ? occurredAt : new Date(occurredAt)
-    });
-
-    this.payload = Object.freeze({
+    // 5. Populate subclass payload properties
+    this.payload = {
       paymentId,
       bookingId,
       tenantId,
@@ -54,21 +57,21 @@ export class PaymentRefundedEvent {
       currency: currency.toUpperCase(),
       status,
       processedBy
-    });
+    };
 
-    Object.freeze(this);
+    // 6. Guarantee deep immutability across the entire payload automatically
+    this.freezeEvent();
   }
 
   /**
-   * Serializes the domain event into a standard data structure.
-   * Maintains structured sub-objects to prevent property name collisions.
+   * Standardized serialization for Outbox DB / Kafka
    */
   toJSON() {
     return {
-      eventName: this.name,
-      version: this.version,
-      metadata: { ...this.metadata },
-      payload: { ...this.payload }
+      eventName: this.metadata.eventName,
+      version: this.metadata.eventVersion,
+      metadata: this.metadata,
+      payload: this.payload
     };
   }
 }

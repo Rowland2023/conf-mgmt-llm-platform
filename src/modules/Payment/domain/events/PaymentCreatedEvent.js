@@ -1,11 +1,12 @@
 // modules/payment/domain/events/PaymentCreatedEvent.js
 
+import { DomainEvent } from '../../../shared/domain/DomainEvent.js'; // Adjust path based on your directory structure
 import { ValidationError } from "../errors/PaymentErrors.js";
 
-export class PaymentCreatedEvent {
+export class PaymentCreatedEvent extends DomainEvent {
   constructor({
-    id,
-    paymentId,
+    id,                  // Passed to base class as eventId
+    paymentId,           // Maps to aggregateId in the base class
     bookingId,
     tenantId = null,
     userId = null,
@@ -15,88 +16,49 @@ export class PaymentCreatedEvent {
     email,
     idempotencyKey,
     correlationId = null,
+    causationId = null,  // Keep downstream tracing capabilities open
     createdAt = new Date()
   }) {
+    // 1. Pass core metadata up to the base class constructor
+    super({
+      eventName: 'payment.created',
+      aggregateId: paymentId,
+      eventId: id,
+      occurredAt: createdAt instanceof Date ? createdAt : new Date(createdAt),
+      correlationId,
+      causationId
+    });
 
-    // 1. Core Architectural Identity Guards
-    if (!id || typeof id !== "string") {
-      throw new ValidationError("Event ID is required.");
-    }
-
-    if (!paymentId || typeof paymentId !== "string") {
-      throw new ValidationError("Payment aggregate ID is required.");
-    }
-
+    // 2. Subclass-Specific Identity Guards
     if (!bookingId || typeof bookingId !== "string") {
       throw new ValidationError("Booking ID is required.");
     }
 
     // Support both individual and corporate payments
     if (!tenantId && !userId) {
-      throw new ValidationError(
-        "Either tenantId or userId is required."
-      );
+      throw new ValidationError("Either tenantId or userId is required.");
     }
 
-
-    // 2. Financial Intent Guards
-    // Amount is stored in minor currency units
+    // 3. Financial Intent Guards
     if (!Number.isInteger(amount) || amount <= 0) {
-      throw new ValidationError(
-        "Payment amount must be a positive integer in minor units."
-      );
+      throw new ValidationError("Payment amount must be a positive integer in minor units.");
     }
 
-    if (
-      typeof currency !== "string" ||
-      !/^[A-Z]{3}$/i.test(currency)
-    ) {
-      throw new ValidationError(
-        "Invalid currency code format. Must be ISO 3-letter code."
-      );
+    if (typeof currency !== "string" || !/^[A-Z]{3}$/i.test(currency)) {
+      throw new ValidationError("Invalid currency code format. Must be ISO 3-letter code.");
     }
 
-
-    // 3. Customer & Request Integrity Guards
-    if (
-      typeof email !== "string" ||
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-    ) {
-      throw new ValidationError(
-        "A valid customer email is required."
-      );
+    // 4. Customer & Request Integrity Guards
+    if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new ValidationError("A valid customer email is required.");
     }
 
-    if (
-      !idempotencyKey ||
-      typeof idempotencyKey !== "string"
-    ) {
-      throw new ValidationError(
-        "Idempotency key is required."
-      );
+    if (!idempotencyKey || typeof idempotencyKey !== "string") {
+      throw new ValidationError("Idempotency key is required.");
     }
 
-
-    // 4. Event Identity
-    this.name = "PaymentCreatedEvent";
-    this.version = 1;
-
-
-    // 5. Event Metadata Envelope
-    this.metadata = Object.freeze({
-      eventId: id,
-      aggregateId: paymentId,
-      aggregateType: "Payment",
-      correlationId,
-      occurredAt:
-        createdAt instanceof Date
-          ? createdAt
-          : new Date(createdAt)
-    });
-
-
-    // 6. Immutable Business Payload
-    this.payload = Object.freeze({
+    // 5. Immutable Business Payload
+    this.payload = {
       paymentId,
       bookingId,
       tenantId,
@@ -106,30 +68,21 @@ export class PaymentCreatedEvent {
       gateway,
       email,
       idempotencyKey
-    });
+    };
 
-
-    // Prevent mutation
-    Object.freeze(this);
+    // 6. Prevent mutation using inherited parent method
+    this.freezeEvent();
   }
 
-
   /**
-   * Serialize event safely for:
-   * - Transactional Outbox
-   * - Kafka publishing
-   * - Audit storage
+   * Standardized serialization for Outbox table / Kafka
    */
   toJSON() {
     return {
-      eventName: this.name,
-      version: this.version,
-      metadata: {
-        ...this.metadata
-      },
-      payload: {
-        ...this.payload
-      }
+      eventName: this.metadata.eventName,
+      version: this.metadata.eventVersion,
+      metadata: this.metadata,
+      payload: this.payload
     };
   }
 }

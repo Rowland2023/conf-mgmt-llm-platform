@@ -1,27 +1,29 @@
-import crypto from "crypto";
+// src/modules/conference/domain/events/EventCancelled.js
+
+import { DomainEvent } from "../../../../Shared/domain/DomainEvent.js"; // Adjust path to your base DomainEvent class
 import { DomainInvariantError } from "../../../../Shared/errors/DomainErrors.js";
-import { deepFreeze } from "../../../../Shared/utils/deepFreeze.js";
 
 /**
  * Raised when an event has been cancelled.
  * Pure Immutable Domain Event.
  */
-export class EventCancelled {
+export class EventCancelled extends DomainEvent {
   /**
    * @param {Object} data
    * @param {string} data.eventId - Aggregate Root Identifier reference
    * @param {string|null} [data.reason=null] - Reason explaining the cancellation
-   * @param {string|null} [data.correlationId=null] - Distributed tracing identifier tracking transaction trees
+   * @param {string|null} [data.correlationId=null] - Distributed tracing token
+   * @param {string|null} [data.causationId=null] - Causal trace origin token
    * @param {Date|string} [data.occurredAt=new Date()] - Explicit creation date hook
-   * @param {string|null} [data.id=null] - Optional override used solely by factory hydration layers
    */
   constructor({
     eventId,
     reason = null,
     correlationId = null,
-    occurredAt = new Date(),
-    id = null
+    causationId = null,
+    occurredAt = new Date()
   }) {
+    // 1. Enforce business invariants first
     if (!eventId) {
       throw new DomainInvariantError("EventCancelled: initialization missing parameter [eventId].");
     }
@@ -36,59 +38,62 @@ export class EventCancelled {
       ? reason.trim() 
       : null;
 
-    this.id = id || crypto.randomUUID();
-    this.aggregateId = eventId;
-    this.aggregateType = "Event";
-    this.type = "EventCancelled";
-    this.version = 1;
-    this.occurredAt = parsedOccurred.toISOString();
-    this.correlationId = correlationId || null;
-
-    this.payload = deepFreeze({
-      eventId,
-      reason: normalizedReason
+    // 2. Delegate Envelope, Identity, and Tracing Metadata to the Parent Base Class
+    super({
+      eventName: "event.cancelled",
+      eventVersion: 1,
+      aggregateId: eventId,
+      occurredAt: parsedOccurred,
+      correlationId,
+      causationId
     });
 
-    Object.freeze(this);
+    // 3. Formulate Domain-Specific Payload Shell
+    this.payload = {
+      eventId,
+      reason: normalizedReason
+    };
+
+    // 4. Single atomic top-down deep freeze pass handled uniformly by base class utility
+    this.freezeEvent();
   }
 
   /**
    * Standard contract serializer method.
-   * Maps internal structures to raw JSON primitive collections safely.
+   * Maps internal structures to raw JSON structures for the outbox table or brokers.
    * 
    * @returns {Object}
    */
   toJSON() {
     return {
-      id: this.id,
-      aggregateId: this.aggregateId,
-      aggregateType: this.aggregateType,
-      type: this.type,
-      version: this.version,
-      occurredAt: this.occurredAt,
-      correlationId: this.correlationId,
+      eventName: this.metadata.eventName,
+      version: this.metadata.eventVersion,
+      metadata: this.metadata,
       payload: this.payload
     };
   }
 
   /**
    * Static Rehydration Factory Engine.
-   * Reconstructs historical instances out of saved storage arrays without generating new IDs.
+   * Reconstructs historical instances out of saved infrastructure logs without side effects.
    * 
    * @param {Object} json - Document map pulled out of the infrastructure database.
    * @returns {EventCancelled}
    */
   static fromJSON(json) {
     if (!json?.payload) {
-      throw new DomainInvariantError("EventCancelled: Cannot rehydrate event from an invalid or empty object payload structure.");
+      throw new DomainInvariantError("EventCancelled: Cannot rehydrate event from an invalid or empty payload structure.");
     }
 
+    // Extract values dynamically respecting both nested metadata envelopes and older flat formats
+    const metadata = json.metadata || {};
+    
     return new EventCancelled({
-      id: json.id,
-      eventId: json.aggregateId || json.payload.eventId,
+      eventId: json.aggregateId || metadata.aggregateId || json.payload.eventId,
       reason: json.payload.reason,
-      correlationId: json.correlationId,
-      occurredAt: json.occurredAt
+      correlationId: json.correlationId || metadata.correlationId,
+      causationId: json.causationId || metadata.causationId,
+      occurredAt: json.occurredAt || metadata.occurredAt
     });
   }
 }

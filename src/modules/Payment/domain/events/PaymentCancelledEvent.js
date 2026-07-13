@@ -1,10 +1,10 @@
 // modules/payment/domain/events/PaymentCancelledEvent.js
-import { ValidationError } from "../errors/PaymentErrors.js";
+import { DomainEvent } from '../../../shared/domain/DomainEvent.js'; // Fix import path
+import { ValidationError } from '../errors/PaymentErrors.js';
 
-export class PaymentCancelledEvent {
+export class PaymentCancelledEvent extends DomainEvent {
   constructor({
-    id,
-    paymentId,
+    paymentId, // Will map to aggregateId in base class
     bookingId,
     tenantId,
     userId = null,
@@ -13,41 +13,36 @@ export class PaymentCancelledEvent {
     gateway,
     reason = "User abandoned checkout session",
     cancelledBy = "CUSTOMER",
-    cancelledAt = new Date()
+    cancelledAt = new Date(),
+    // Keep downstream tracing capabilities open
+    correlationId = null,
+    causationId = null
   }) {
-    // 1. Core Architectural Identity Guards
-    if (!id) throw new ValidationError("Event ID is required.");
-    if (!paymentId) throw new ValidationError("Payment aggregate ID is required.");
+    // 1. Pass core metadata up to the base class constructor
+    super({
+      eventName: 'payment.cancelled',
+      aggregateId: paymentId,
+      occurredAt: cancelledAt instanceof Date ? cancelledAt : new Date(cancelledAt),
+      correlationId,
+      causationId
+    });
+
+    // 2. Subclass Validation Guards (Financial & Contextual)
     if (!bookingId) throw new ValidationError("Booking ID is required.");
     if (!tenantId) throw new ValidationError("Tenant ID is required.");
-
-    // 2. Financial Context Guards
     if (!Number.isInteger(amount) || amount <= 0) {
       throw new ValidationError("Payment amount must be a positive integer in minor units.");
     }
     if (!/^[A-Z]{3}$/i.test(currency)) {
       throw new ValidationError("Invalid currency code format.");
     }
-
-    // 3. Operational Cancellation Guards
     if (!gateway) throw new ValidationError("Gateway identifier is required.");
     if (!["CUSTOMER", "SYSTEM", "ADMIN"].includes(cancelledBy.toUpperCase())) {
       throw new ValidationError("Invalid actor assignment for cancelledBy attribute.");
     }
 
-    this.name = "PaymentCancelledEvent";
-    this.version = 1;
-
-    // Isolate cross-cutting architectural routing details
-    this.metadata = Object.freeze({
-      eventId: id,
-      aggregateId: paymentId,
-      aggregateType: "Payment",
-      occurredAt: cancelledAt instanceof Date ? cancelledAt : new Date(cancelledAt)
-    });
-
-    // Isolate pure contextual cancellation data fields
-    this.payload = Object.freeze({
+    // 3. Populate subclass payload
+    this.payload = {
       paymentId,
       bookingId,
       tenantId,
@@ -55,24 +50,25 @@ export class PaymentCancelledEvent {
       amount,
       currency: currency.toUpperCase(),
       gateway,
-      cancellation: Object.freeze({
+      cancellation: {
         reason,
         initiatedBy: cancelledBy.toUpperCase()
-      })
-    });
+      }
+    };
 
-    Object.freeze(this);
+    // 4. Guarantee deep immutability using the parent's base method
+    this.freezeEvent();
   }
 
   /**
-   * Serializes the domain event into a standard data structure safely.
+   * Overriding/Standardizing JSON structure across all events
    */
   toJSON() {
     return {
-      eventName: this.name,
-      version: this.version,
-      metadata: { ...this.metadata },
-      payload: { ...this.payload }
+      eventName: this.metadata.eventName,
+      eventVersion: this.metadata.eventVersion,
+      metadata: this.metadata,
+      payload: this.payload
     };
   }
 }

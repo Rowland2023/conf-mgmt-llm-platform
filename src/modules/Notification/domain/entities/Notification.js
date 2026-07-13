@@ -1,266 +1,131 @@
-import { randomUUID } from "crypto";
-import { NotificationQueued } from "../events/NotificationQueued.js";
-import { NotificationSent } from "../events/NotificationSent.js";
-import { NotificationFailed } from "../events/NotificationFailed.js";
-import { NotificationRead } from "../events/NotificationRead.js";
-import { ReminderCancelled } from "../events/ReminderCancelled.js";
-import { ReminderDelivered } from "../events/ReminderDelivered.js";
-
-export const CHANNELS = Object.freeze({
-    EMAIL: "email",
-    SMS: "sms",
-    PUSH: "push"
-});
-
-export const STATUS = Object.freeze({
-    PENDING: "pending",
-    SCHEDULED: "scheduled",
-    SENT: "sent",
-    FAILED: "failed",
-    CANCELLED: "cancelled",
-    READ: "read"
-});
-
-export class Notification {
+export class Notification extends Entity {
     constructor({
-        id = randomUUID(),
+        id,
         userId = null,
-        conferenceId = null,
+        contextType, // 'conference', 'payment', 'escrow'
+        contextId,
         recipient,
         channel,
+        templateKey, // 'funds_released', 'reminder_24h'
         subject = null,
         title = null,
         body,
         metadata = {},
         status = STATUS.PENDING,
+        correlationId = null,
+        version = 0,
         createdAt = new Date(),
         scheduledFor = null,
         sentAt = null,
-        readAt = null
+        deliveredAt = null,
+        readAt = null,
+        providerMessageId = null
     }) {
-        this.id = id;
+        super(id);
         this.userId = userId;
-        this.conferenceId = conferenceId;
+        this.contextType = contextType;
+        this.contextId = contextId;
         this.recipient = recipient;
         this.channel = channel;
+        this.templateKey = templateKey;
         this.subject = subject;
         this.title = title;
         this.body = body;
         this.metadata = Object.freeze({ ...metadata });
         this.status = status;
-        this.createdAt = createdAt;
+        this.correlationId = correlationId;
+        this.version = version;
+        this.createdAt = new Date(createdAt);
         this.scheduledFor = scheduledFor ? new Date(scheduledFor) : null;
         this.sentAt = sentAt ? new Date(sentAt) : null;
+        this.deliveredAt = deliveredAt ? new Date(deliveredAt) : null;
         this.readAt = readAt ? new Date(readAt) : null;
-
-        this.domainEvents = [];
+        this.providerMessageId = providerMessageId;
     }
 
-    // -----------------------------------------------------------------
-    // Factory Boundaries
-    // -----------------------------------------------------------------
-
-    static createEmail({ userId, recipient, subject, body, metadata = {} }) {
-        if (!recipient) throw new Error("Validation Error: Recipient email is required.");
-        if (!subject) throw new Error("Validation Error: Email subject is required.");
-        if (!body) throw new Error("Validation Error: Email body is required.");
-
+    // Factory now emits correct event
+    static schedule({ userId, contextType, contextId, recipient, channel, templateKey, body, scheduledFor, correlationId, decidedAt }) {
         const notification = new Notification({
-            userId,
-            recipient,
-            subject,
-            body,
-            metadata,
-            channel: CHANNELS.EMAIL
-        });
-
-        notification.recordEvent(new NotificationQueued({
-            notificationId: notification.id,
-            userId: notification.userId,
-            recipient: notification.recipient,
-            channel: notification.channel,
-            metadata: notification.metadata
-        }));
-
-        return notification;
-    }
-
-    static createSMS({ userId, recipient, message, metadata = {} }) {
-        if (!recipient) throw new Error("Validation Error: Recipient phone number is required.");
-        if (!message) throw new Error("Validation Error: SMS message is required.");
-
-        const notification = new Notification({
-            userId,
-            recipient,
-            body: message,
-            metadata,
-            channel: CHANNELS.SMS
-        });
-
-        notification.recordEvent(new NotificationQueued({
-            notificationId: notification.id,
-            userId: notification.userId,
-            recipient: notification.recipient,
-            channel: notification.channel,
-            metadata: notification.metadata
-        }));
-
-        return notification;
-    }
-
-    static createPush({ userId, recipient, title, body, metadata = {} }) {
-        if (!recipient) throw new Error("Validation Error: Push recipient is required.");
-        if (!title) throw new Error("Validation Error: Push title is required.");
-        if (!body) throw new Error("Validation Error: Push body is required.");
-
-        const notification = new Notification({
-            userId,
-            recipient,
-            title,
-            body,
-            metadata,
-            channel: CHANNELS.PUSH
-        });
-
-        notification.recordEvent(new NotificationQueued({
-            notificationId: notification.id,
-            userId: notification.userId,
-            recipient: notification.recipient,
-            channel: notification.channel,
-            metadata: notification.metadata
-        }));
-
-        return notification;
-    }
-
-    static scheduleConferenceReminder({ userId, conferenceId, recipient, channel, subject, title, body, scheduledFor, metadata = {} }) {
-        if (!conferenceId) throw new Error("Validation Error: A conference context identifier is strictly required.");
-        if (!scheduledFor || new Date(scheduledFor) <= new Date()) {
-            throw new Error("Validation Error: 'scheduledFor' date must be a valid point in the future.");
-        }
-
-        const notification = new Notification({
-            userId,
-            conferenceId,
-            recipient,
-            channel,
-            subject,
-            title,
-            body,
-            metadata,
+            userId, contextType, contextId, recipient, channel, templateKey, body,
             status: STATUS.SCHEDULED,
-            scheduledFor
+            scheduledFor,
+            correlationId
         });
 
-        notification.recordEvent(new NotificationQueued({
+        notification.recordEvent(new ReminderScheduled({
             notificationId: notification.id,
+            contextType: notification.contextType,
+            contextId: notification.contextId,
             userId: notification.userId,
-            recipient: notification.recipient,
-            channel: notification.channel,
-            metadata: { ...metadata, scheduledFor: notification.scheduledFor.toISOString() }
+            templateKey: notification.templateKey,
+            scheduledFor: notification.scheduledFor,
+            decidedAt,
+            correlationId
         }));
 
         return notification;
     }
 
-    // -----------------------------------------------------------------
-    // Domain State Machine Mutations & Lifecycle Rules
-    // -----------------------------------------------------------------
-
-    markAsSent() {
-        if (this.status === STATUS.SENT || this.status === STATUS.READ || this.status === STATUS.CANCELLED) {
-            return;
+    // Split sent vs delivered
+    markAsSent({ sentAt, providerMessageId }) {
+        if (this.status !== STATUS.PENDING && this.status !== STATUS.SCHEDULED) {
+            throw new ValidationError(`Cannot send notification in status ${this.status}`);
         }
+        if (!sentAt) throw new ValidationError("sentAt required");
 
-        const explicitReminderContext = this.conferenceId !== null;
         this.status = STATUS.SENT;
-        this.sentAt = new Date();
+        this.sentAt = new Date(sentAt);
+        this.providerMessageId = providerMessageId;
 
-        // Branch dynamically to target the precise bounded-context domain event type
-        if (explicitReminderContext) {
-            this.recordEvent(new ReminderDelivered({
-                notificationId: this.id,
-                conferenceId: this.conferenceId,
-                userId: this.userId,
-                recipient: this.recipient,
-                channel: this.channel,
-                metadata: this.metadata
-            }));
-        } else {
-            this.recordEvent(new NotificationSent({
-                notificationId: this.id,
-                userId: this.userId,
-                recipient: this.recipient,
-                channel: this.channel,
-                metadata: this.metadata
-            }));
-        }
-    }
-
-    markAsFailed(reason) {
-        if (this.status === STATUS.READ || this.status === STATUS.CANCELLED) {
-            return;
-        }
-
-        this.status = STATUS.FAILED;
-
-        this.recordEvent(new NotificationFailed({
+        this.recordEvent(new NotificationSent({
             notificationId: this.id,
+            userId: this.userId,
+            contextType: this.contextType,
+            contextId: this.contextId,
             channel: this.channel,
-            recipient: this.recipient,
-            reason,
-            metadata: this.metadata
+            sentAt: this.sentAt,
+            providerMessageId: this.providerMessageId,
+            correlationId: this.correlationId
         }));
     }
 
-    cancelReminder(reason) {
-        if (this.status !== STATUS.SCHEDULED) {
-            throw new Error(`Domain Error: Active notifications in state '${this.status}' cannot be cancelled.`);
+    markAsDelivered({ deliveredAt, providerMessageId }) {
+        if (this.status !== STATUS.SENT) {
+            throw new ValidationError(`Cannot mark delivered from status ${this.status}`);
         }
+        if (!deliveredAt) throw new ValidationError("deliveredAt required");
+
+        this.deliveredAt = new Date(deliveredAt);
+        this.providerMessageId = providerMessageId || this.providerMessageId;
+
+        this.recordEvent(new ReminderDelivered({
+            notificationId: this.id,
+            contextType: this.contextType,
+            contextId: this.contextId,
+            userId: this.userId,
+            channel: this.channel,
+            deliveredAt: this.deliveredAt,
+            providerMessageId: this.providerMessageId,
+            correlationId: this.correlationId
+        }));
+    }
+
+    cancel({ cancelledAt, cancelledBy, reason }) {
+        if (this.status !== STATUS.SCHEDULED && this.status !== STATUS.PENDING) {
+            throw new ValidationError(`Cannot cancel notification in status ${this.status}`);
+        }
+        if (!cancelledAt) throw new ValidationError("cancelledAt required");
 
         this.status = STATUS.CANCELLED;
 
         this.recordEvent(new ReminderCancelled({
             notificationId: this.id,
-            conferenceId: this.conferenceId,
-            recipient: this.recipient,
-            reason: reason || "User requested cancellation",
-            metadata: this.metadata
+            contextType: this.contextType,
+            contextId: this.contextId,
+            cancelledBy,
+            reason,
+            cancelledAt,
+            correlationId: this.correlationId
         }));
-    }
-
-    markAsRead() {
-        if (this.status === STATUS.READ || this.readAt) {
-            return;
-        }
-
-        if (!this.userId) {
-            throw new Error("Domain Error: Cannot mark a notification as read when no associated 'userId' exists.");
-        }
-
-        this.readAt = new Date();
-        this.status = STATUS.READ;
-
-        this.recordEvent(new NotificationRead({
-            notificationId: this.id,
-            userId: this.userId,
-            recipient: this.recipient,
-            channel: this.channel,
-            metadata: this.metadata
-        }));
-    }
-
-    // -----------------------------------------------------------------
-    // Event Transaction Handlers
-    // -----------------------------------------------------------------
-
-    recordEvent(eventInstance) {
-        this.domainEvents.push(eventInstance);
-    }
-
-    pullEvents() {
-        const events = [...this.domainEvents];
-        this.domainEvents.length = 0; 
-        return events;
     }
 }
