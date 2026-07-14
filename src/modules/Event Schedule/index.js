@@ -1,34 +1,13 @@
-// -----------------------------------------------------------------------------
-// Infrastructure Layer: Data Repositories
-// -----------------------------------------------------------------------------
+// src/modules/schedule/index.js
+import { UnitOfWork } from "../../shared/infrastructure/UnitOfWork.js";
 import { PostgresEventRepository } from "./infrastructure/repositories/PostgresEventRepository.js";
 import { PostgresOutboxRepository } from "./infrastructure/repositories/PostgresOutboxRepository.js";
-
-// -----------------------------------------------------------------------------
-// Infrastructure Layer: Network Gateways
-// -----------------------------------------------------------------------------
 import { GoogleCalendarGateway } from "./infrastructure/gateways/GoogleCalendarGateway.js";
 import { OutlookCalendarGateway } from "./infrastructure/gateways/OutlookCalendarGateway.js";
 import { ZoomGateway } from "./infrastructure/gateways/ZoomGateway.js";
-
-// -----------------------------------------------------------------------------
-// Infrastructure Layer: Core Anti-Corruption & Synchronization Services
-// -----------------------------------------------------------------------------
 import { CalendarSynchronizationService } from "./infrastructure/services/CalendarSynchronizationService.js";
-
-// -----------------------------------------------------------------------------
-// Infrastructure Layer: Background Engine Daemons
-// -----------------------------------------------------------------------------
 import { OutboxWorker } from "./infrastructure/workers/OutboxWorker.js";
-
-// -----------------------------------------------------------------------------
-// Domain Layer: Pure Business Rule Services
-// -----------------------------------------------------------------------------
 import { EventSchedulingService } from "./domain/services/EventSchedulingService.js";
-
-// -----------------------------------------------------------------------------
-// Application Layer: Orchestration Use Cases
-// -----------------------------------------------------------------------------
 import { CreateEventUseCase } from "./application/use-cases/CreateEventUseCase.js";
 import { UpdateEventUseCase } from "./application/use-cases/UpdateEventUseCase.js";
 import { DeleteEventUseCase } from "./application/use-cases/DeleteEventUseCase.js";
@@ -36,146 +15,110 @@ import { GetEventUseCase } from "./application/use-cases/GetEventUseCase.js";
 import { ListEventsUseCase } from "./application/use-cases/ListEventsUseCase.js";
 import { RescheduleEventUseCase } from "./application/use-cases/RescheduleEventUseCase.js";
 import { CancelEventUseCase } from "./application/use-cases/CancelEventUseCase.js";
+import { EventController, createEventRouter } from "./api/index.js";
 
-// -----------------------------------------------------------------------------
-// Presentation Layer: HTTP Transport Surface API
-// -----------------------------------------------------------------------------
-import { EventController } from "./api/event.controller.js";
-import { createEventRouter } from "./api/event.route.js";
+export function createEventModule({ dbConnection, logger, config }) {
+  // 1. Fail fast
+  if (!dbConnection) throw new Error("Event Module: dbConnection is required.");
+  if (!logger) throw new Error("Event Module: logger is required.");
+  if (!config) throw new Error("Event Module: config is required.");
 
-/**
- * Module Initializer Matrix (Bottom-Up Assembly Factory)
- * 
- * Isolates the module from global database instances by accepting database connections 
- * explicitly from the application bootstrapper.
- * 
- * @param {Object} config
- * @param {Object} config.dbConnection - Instantiated Knex connection instance or equivalent query builder client
- * @returns {Object} Exported module runtime contract surfaces
- */
-export function initializeEventScheduleModule({ dbConnection }) {
-    if (!dbConnection) {
-        throw new Error("EventSchedule Module Factory Failure: An active dbConnection instance is required.");
+  // 2. UnitOfWork - single source of truth for transactions
+  const uow = new UnitOfWork(dbConnection);
+  
+  // 3. Repositories - ONLY receive uow, not raw dbConnection
+  const eventRepository = new PostgresEventRepository({ uow });
+  const outboxRepository = new PostgresOutboxRepository({ uow });
+
+  // 4. Gateways
+  const googleCalendarGateway = new GoogleCalendarGateway({
+    clientId: config?.google?.clientId,
+    clientSecret: config?.google?.clientSecret,
+    logger
+  });
+  const outlookCalendarGateway = new OutlookCalendarGateway({
+    clientId: config?.microsoft?.clientId,
+    clientSecret: config?.microsoft?.clientSecret,
+    logger
+  });
+  const zoomGateway = new ZoomGateway({
+    apiKey: config?.zoom?.apiKey,
+    apiSecret: config?.zoom?.apiSecret,
+    logger
+  });
+
+  // 5. Infrastructure Services
+  const calendarSynchronizationService = new CalendarSynchronizationService({
+    googleCalendarGateway,
+    outlookCalendarGateway,
+    zoomGateway,
+    logger
+  });
+
+  // 6. Domain Services
+  const eventSchedulingService = new EventSchedulingService({ eventRepository });
+
+  // 7. Use Cases - all get uow for transactional outbox
+  const createEventUseCase = new CreateEventUseCase({
+    eventRepository, outboxRepository, eventSchedulingService, uow, logger
+  });
+  const updateEventUseCase = new UpdateEventUseCase({
+    eventRepository, outboxRepository, eventSchedulingService, uow, logger
+  });
+  const deleteEventUseCase = new DeleteEventUseCase({
+    eventRepository, outboxRepository, uow, logger
+  });
+  const rescheduleEventUseCase = new RescheduleEventUseCase({
+    eventRepository, outboxRepository, eventSchedulingService, uow, logger
+  });
+  const cancelEventUseCase = new CancelEventUseCase({
+    eventRepository, outboxRepository, eventSchedulingService, uow, logger
+  });
+  const getEventUseCase = new GetEventUseCase({ eventRepository, logger });
+  const listEventsUseCase = new ListEventsUseCase({ eventRepository, logger });
+
+  // 8. Background Workers
+  const outboxWorker = new OutboxWorker({
+    outboxRepository,
+    calendarSynchronizationService,
+    logger
+  });
+
+  // 9. Presentation
+  const eventController = new EventController({
+    createEventUseCase,
+    updateEventUseCase,
+    deleteEventUseCase,
+    getEventUseCase,
+    listEventsUseCase,
+    rescheduleEventUseCase,
+    cancelEventUseCase
+  });
+
+  const eventRouter = createEventRouter({ eventController });
+
+  // 10. Module API
+  return {
+    eventRouter,
+    
+    subscribe: (eventBus) => {
+      eventBus.subscribe('payment.released', async (evt) => {
+        await createEventUseCase.execute({
+          title: `Escrow Released: ${evt.paymentId}`,
+          startTime: evt.releasedAt,
+          type: 'SYSTEM',
+          correlationId: evt.correlationId
+        });
+      });
+    },
+    
+    start: async () => {
+      logger.info('Starting Event module workers...');
+      await outboxWorker.start();
+    },
+    stop: async () => {
+      logger.info('Stopping Event module workers...');
+      await outboxWorker.stop();
     }
-
-    // 1. Core Base Data Storage Engines
-    const eventRepository = new PostgresEventRepository(dbConnection);
-    const outboxRepository = new PostgresOutboxRepository(dbConnection);
-
-    // 2. High-Level Network Client Gateways
-    const googleCalendarGateway = new GoogleCalendarGateway();
-    const outlookCalendarGateway = new OutlookCalendarGateway();
-    const zoomGateway = new ZoomGateway();
-
-    // 3. Infrastructure Coordination Facades
-    const calendarSynchronizationService = new CalendarSynchronizationService({
-        googleCalendarGateway,
-        outlookCalendarGateway,
-        zoomGateway
-    });
-
-    // 4. Pure Domain Coordination Services
-    const eventSchedulingService = new EventSchedulingService({
-        eventRepository
-    });
-
-    // 5. Application Single-Intent Use Cases
-    const createEventUseCase = new CreateEventUseCase({
-        eventRepository,
-        outboxRepository,
-        eventSchedulingService
-    });
-
-    const updateEventUseCase = new UpdateEventUseCase({
-        eventRepository,
-        outboxRepository,
-        eventSchedulingService
-    });
-
-    const deleteEventUseCase = new DeleteEventUseCase({
-        eventRepository,
-        outboxRepository
-    });
-
-    const getEventUseCase = new GetEventUseCase({
-        eventRepository
-    });
-
-    const listEventsUseCase = new ListEventsUseCase({
-        eventRepository
-    });
-
-    const rescheduleEventUseCase = new RescheduleEventUseCase({
-        eventRepository,
-        outboxRepository,
-        eventSchedulingService
-    });
-
-    const cancelEventUseCase = new CancelEventUseCase({
-        eventRepository,
-        outboxRepository,
-        eventSchedulingService
-    });
-
-    // 6. Asynchronous Background Daemon Loop Workers
-    const outboxWorker = new OutboxWorker({
-        outboxRepository,
-        calendarSynchronizationService
-    });
-
-    // 7. HTTP Network Input Controllers
-    const eventController = new EventController({
-        createEventUseCase,
-        updateEventUseCase,
-        deleteEventUseCase,
-        getEventUseCase,
-        listEventsUseCase,
-        rescheduleEventUseCase,
-        cancelEventUseCase
-    });
-
-    // 8. Core Router Interface Mapping
-    const eventRouter = createEventRouter({
-        eventController
-    });
-
-    // 9. Lifecycle Control Hooks Interface Surface
-    return {
-        eventRouter,
-        
-        /**
-         * Safely starts background workers, listeners, and loops.
-         */
-        async start() {
-            if (outboxWorker && typeof outboxWorker.start === "function") {
-                await outboxWorker.start();
-            }
-        },
-
-        /**
-         * Safely shuts down background routines during graceful service teardowns.
-         */
-        async stop() {
-            if (outboxWorker && typeof outboxWorker.stop === "function") {
-                await outboxWorker.stop();
-            }
-        },
-
-        // Exported infrastructure adapters for testing or multi-module composition needs
-        eventRepository,
-        outboxRepository,
-        eventSchedulingService,
-        calendarSynchronizationService,
-
-        // Exported use-case boundaries
-        useCases: {
-            createEventUseCase,
-            updateEventUseCase,
-            deleteEventUseCase,
-            getEventUseCase,
-            listEventsUseCase,
-            rescheduleEventUseCase,
-            cancelEventUseCase
-        }
-    };
+  };
 }

@@ -5,17 +5,23 @@ const VALID_STATUSES = Object.freeze(new Set([
   'PENDING', 
   'GATEWAY_INITIALIZED', 
   'SUCCESSFUL', 
+  'HELD',           // <-- ADDED: funds captured, in escrow
+  'RELEASED',       // <-- ADDED: funds paid to seller - terminal
   'FAILED', 
   'PARTIALLY_REFUNDED', 
   'REFUNDED',
   'CANCELED'
 ]));
 
+// Escrow flow: PENDING -> GATEWAY_INITIALIZED -> SUCCESSFUL -> HELD -> RELEASED
+// Direct flow: PENDING -> GATEWAY_INITIALIZED -> SUCCESSFUL
 const TRANSITION_MAP = Object.freeze({
   'PENDING': Object.freeze(['GATEWAY_INITIALIZED', 'FAILED', 'CANCELED']),
   'GATEWAY_INITIALIZED': Object.freeze(['SUCCESSFUL', 'FAILED', 'CANCELED']),
-  'SUCCESSFUL': Object.freeze(['PARTIALLY_REFUNDED', 'REFUNDED']),
-  'PARTIALLY_REFUNDED': Object.freeze(['REFUNDED']), // FIX: remove self-transition
+  'SUCCESSFUL': Object.freeze(['HELD', 'PARTIALLY_REFUNDED', 'REFUNDED']), // can go to escrow
+  'HELD': Object.freeze(['RELEASED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'CANCELED']), // escrow can release or refund
+  'RELEASED': Object.freeze([]), // terminal - money gone
+  'PARTIALLY_REFUNDED': Object.freeze(['REFUNDED', 'RELEASED']), // can fully refund or release remainder
   'FAILED': Object.freeze([]),
   'REFUNDED': Object.freeze([]),
   'CANCELED': Object.freeze([])
@@ -23,7 +29,7 @@ const TRANSITION_MAP = Object.freeze({
 
 export class PaymentStatus {
   constructor(value) {
-    if (!value || typeof value!== 'string') {
+    if (!value || typeof value !== 'string') {
       throw new ValidationError("PaymentStatus must be a non-empty string");
     }
 
@@ -48,7 +54,7 @@ export class PaymentStatus {
 
   isTransitionAllowedTo(nextStatus) {
     const targetValue = nextStatus instanceof PaymentStatus ? nextStatus.value : nextStatus;
-    if (!targetValue || typeof targetValue!== 'string') return false;
+    if (!targetValue || typeof targetValue !== 'string') return false;
     
     const upperTarget = targetValue.toUpperCase();
     const allowed = TRANSITION_MAP[this._value] || [];
@@ -66,6 +72,8 @@ export class PaymentStatus {
   isPending() { return this._value === 'PENDING'; }
   isGatewayInitialized() { return this._value === 'GATEWAY_INITIALIZED'; }
   isSuccessful() { return this._value === 'SUCCESSFUL'; }
+  isHeld() { return this._value === 'HELD'; } // <-- ADDED
+  isReleased() { return this._value === 'RELEASED'; } // <-- ADDED
   isFailed() { return this._value === 'FAILED'; }
   isPartiallyRefunded() { return this._value === 'PARTIALLY_REFUNDED'; }
   isRefunded() { return this._value === 'REFUNDED'; }
@@ -73,11 +81,11 @@ export class PaymentStatus {
 
   // Convenience
   isTerminal() {
-    return this.isFailed() || this.isRefunded() || this.isCanceled();
+    return this.isFailed() || this.isRefunded() || this.isCanceled() || this.isReleased(); // RELEASED is terminal
   }
 
   isSettled() {
-    return this.isSuccessful() || this.isPartiallyRefunded() || this.isRefunded();
+    return this.isSuccessful() || this.isHeld() || this.isPartiallyRefunded() || this.isRefunded() || this.isReleased();
   }
 
   equals(other) {
