@@ -1,9 +1,9 @@
-// src/modules/ticket/domain/events/TicketReserved.js
+// src/modules/ticket/domain/events/TicketExpired.js
 
 import { DomainEvent } from "../../../shared/domain/DomainEvent.js";
 
-export class TicketReserved extends DomainEvent {
-  static EVENT_NAME = "ticket.reserved";
+export class TicketExpired extends DomainEvent {
+  static EVENT_NAME = "ticket.expired";
 
   /**
    * @param {Object} params
@@ -11,8 +11,6 @@ export class TicketReserved extends DomainEvent {
    * @param {string} params.conferenceId
    * @param {string} params.userId
    * @param {number} params.quantity
-   * @param {number} params.availableAfter
-   * @param {Date} params.expiresAt
    * @param {string|null} [params.correlationId]
    * @param {string|null} [params.causationId]
    * @param {Date} [params.occurredAt]
@@ -23,15 +21,13 @@ export class TicketReserved extends DomainEvent {
     conferenceId,
     userId,
     quantity,
-    availableAfter,
-    expiresAt,
     correlationId = null,
     causationId = null,
     occurredAt,
     eventVersion = 1
   }) {
     super({
-      eventName: TicketReserved.EVENT_NAME,
+      eventName: TicketExpired.EVENT_NAME,
       aggregateId: ticketId,
       eventVersion,
       occurredAt,
@@ -43,9 +39,7 @@ export class TicketReserved extends DomainEvent {
       ticketId,
       conferenceId,
       userId,
-      quantity,
-      availableAfter,
-      expiresAt: expiresAt.toISOString()
+      quantity
     });
 
     this.freezeEvent();
