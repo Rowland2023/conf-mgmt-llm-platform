@@ -2,6 +2,13 @@
 import { Money } from "../value-objects/Money.js";
 import { DomainError } from "../../../shared/domain/DomainError.js";
 
+// Import concrete event classes
+import { TicketCreated } from "../events/TicketCreated.js";
+import { TicketReserved } from "../events/TicketReserved.js";
+import { TicketReleased } from "../events/TicketReleased.js";
+import { TicketPurchased } from "../events/TicketPurchased.js";
+import { TicketCancelled } from "../events/TicketCancelled.js";
+
 export class Ticket {
   #id;
   #conferenceId;
@@ -61,18 +68,17 @@ export class Ticket {
     this.#reserved += quantity;
     this.#incrementVersion(); // <-- CRITICAL
 
-    this.#addEvent({
-      type: 'ticket.reserved',
-      payload: { 
+    this.#addEvent(
+      new TicketReserved({
         ticketId: this.#id,
         conferenceId: this.#conferenceId,
         userId,
         quantity,
         availableAfter: this.available,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 min hold
-      },
-      correlationId
-    });
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min hold
+        correlationId
+      })
+    );
   }
 
   /**
@@ -90,16 +96,15 @@ export class Ticket {
     this.#reserved -= quantity;
     this.#incrementVersion(); // <-- CRITICAL
 
-    this.#addEvent({
-      type: 'ticket.released',
-      payload: { 
+    this.#addEvent(
+      new TicketReleased({
         ticketId: this.#id,
         conferenceId: this.#conferenceId,
         quantity,
-        availableAfter: this.available
-      },
-      correlationId
-    });
+        availableAfter: this.available,
+        correlationId
+      })
+    );
   }
 
   /**
@@ -118,18 +123,17 @@ export class Ticket {
     this.#sold += quantity;
     this.#incrementVersion(); // <-- CRITICAL
 
-    this.#addEvent({
-      type: 'ticket.purchased',
-      payload: { 
+    this.#addEvent(
+      new TicketPurchased({
         ticketId: this.#id,
         conferenceId: this.#conferenceId,
         quantity,
         paymentId,
         soldTotal: this.#sold,
-        revenue: this.#price.multiply(quantity).amount
-      },
-      correlationId
-    });
+        revenue: this.#price.multiply(quantity).amount,
+        correlationId
+      })
+    );
   }
 
   /**
@@ -140,17 +144,16 @@ export class Ticket {
     this.#status = 'CANCELLED';
     this.#incrementVersion(); // <-- CRITICAL
 
-    this.#addEvent({
-      type: 'ticket.cancelled',
-      payload: { 
+    this.#addEvent(
+      new TicketCancelled({
         ticketId: this.#id,
         conferenceId: this.#conferenceId,
         reason,
         refundableCount: this.#sold,
-        reservedToRelease: this.#reserved
-      },
-      correlationId
-    });
+        reservedToRelease: this.#reserved,
+        correlationId
+      })
+    );
   }
 
   #assertActive() {
@@ -160,18 +163,15 @@ export class Ticket {
   }
 
   #addEvent(event) {
-    this.#events.push({
-      ...event,
-      occurredAt: new Date(),
-      aggregateId: this.#id,
-      aggregateType: 'Ticket'
-    });
+    // Since 'event' is now a class instance inheriting from DomainEvent,
+    // it already contains occurredAt, aggregateId, and eventName metadata.
+    this.#events.push(event);
   }
 
   pullEvents() {
     const eventsToPublish = [...this.#events];
     this.#events = [];
-    return eventsToPublish;
+    return eventsToPublish; // Returns array of DomainEvent instances
   }
 
   /**
@@ -195,18 +195,17 @@ export class Ticket {
       version: 0
     });
 
-    ticket.#addEvent({
-      type: 'ticket.created',
-      payload: {
+    ticket.#addEvent(
+      new TicketCreated({
         ticketId: ticket.#id,
         conferenceId,
         type,
         price: price.amount,
         currency: price.currency,
-        capacity
-      },
-      correlationId
-    });
+        capacity,
+        correlationId
+      })
+    );
 
     return ticket;
   }
