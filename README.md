@@ -1,138 +1,369 @@
-conf-mgmt-llm-platform**
+# Conference Management System API
 
-> Enterprise-grade, LLM-orchestrated conference management platform. 
-> Hexagonal Architecture + DDD + Transactional Outbox + Kafka. Zero data loss, p99 < 200ms.
+A production-ready, Domain-Driven Design (DDD) conference management platform built with **Node.js**, **Express.js**, **PostgreSQL**, and **Sequelize**. The system is designed around modular architecture, event-driven principles, and enterprise patterns including **Transactional Outbox**, **Optimistic Concurrency Control**, and **CQRS-inspired application services**.
 
-[[Python](https://img.shields.io/badge/Python-3.11-blue)](https://python.org)
-[[FastAPI](https://img.shields.io/badge/FastAPI-0.111-green)](https://fastapi.tiangolo.com)
-[[Postgres](https://img.shields.io/badge/PostgreSQL-16-blue)](https://postgresql.org)
-[[Kafka](https://img.shields.io/badge/Kafka-3.7-black)](https://kafka.apache.org)
-[[Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen)]()
+---
 
-### **Executive Summary**
+# Features
 
-LLM function-calling gateway for conference operations. The LLM is a stateless adapter that translates natural language into deterministic, audited use cases. All state changes flow through Domain Aggregates with transactional guarantees. Async side-effects via Outbox + Kafka ensure exactly-once business outcomes even during infra failures.
+* Domain-Driven Design (DDD)
+* Modular Architecture
+* RESTful API
+* PostgreSQL Persistence
+* Sequelize ORM
+* Transactional Outbox Pattern
+* Domain Events
+* Optimistic Concurrency Control
+* Repository Pattern
+* Data Mapper Pattern
+* Value Objects
+* Aggregate Roots
+* Event-Driven Architecture
+* Dependency Injection
+* Redis Support (optional)
+* Kafka/RabbitMQ Ready
+* JWT Authentication
+* Role-Based Authorization
+* Soft Delete Support
+* Validation
+* Structured Error Handling
+* Audit-Friendly Architecture
 
-**Business Value**: Reduce ops overhead 80% by letting users book/reschedule via chat. Eliminate double-booking revenue loss. SOC 2 ready audit trail.
+---
 
-### **Architecture Principles**
+# Architecture
 
-| Principle | Implementation | Enterprise Guarantee |
-| --- | --- | --- |
-| **Determinism** | LLM cannot write DB. Only validated DTOs reach Use Cases. | No prompt injection can bypass invariants |
-| **Transactional Integrity** | Postgres ACID: `Aggregate + Outbox` in single txn | Zero data loss if Kafka/Payment gateway down |
-| **Eventual Consistency** | Outbox → Kafka → Consumers with idempotency keys | Exactly-once business effects |
-| **Observability** | OpenTelemetry traces, Prometheus metrics, structured logs | MTTR < 5min, p99 alerts |
-| **Security** | JWT + RBAC, input validation, secrets in Vault, OWASP checks | SOC 2 Type II ready |
-
-### **Request Lifecycle**
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User
-    participant G as API Gateway
-    participant L as LLM Adapter
-    participant A as Application Layer
-    participant D as Domain Aggregate
-    participant P as Postgres
-    participant W as Outbox Worker
-    participant K as Kafka
-
-    U->>G: "Move keynote to 3pm, notify speakers"
-    G->>L: messages + tools=[reschedule_slot]
-    L->>G: function_call(validated JSON)
-    G->>A: RescheduleSlot.execute(dto)
-    A->>D: conference.reschedule_slot()
-    D->>D: Check invariants: capacity, conflicts
-    D-->>A: [SlotRescheduled, SpeakerNotificationNeeded]
-    A->>P: BEGIN; UPDATE conf; INSERT outbox x2; COMMIT
-    A-->>G: 200 OK
-    G-->>U: "Rescheduled. Notifications queued."
-    
-    W->>P: SELECT ... FOR UPDATE SKIP LOCKED
-    W->>K: Publish events
-    K->>Consumers: Email, Calendar, Audit
+```
+src/
+├── config/
+├── modules/
+│   ├── authentication/
+│   ├── conference/
+│   ├── registration/
+│   ├── ticket/
+│   ├── payment/
+│   ├── notification/
+│   └── user/
+│
+├── shared/
+│   ├── application/
+│   ├── domain/
+│   ├── infrastructure/
+│   └── interfaces/
+│
+├── routes/
+├── middleware/
+└── app.js
 ```
 
-### **Data Model & Guarantees**
+Each module is autonomous and contains its own:
 
-1. **Write Path**: `ConferenceAggregate` is the consistency boundary. All invariants enforced in-memory before persistence.
-2. **Outbox Table**: `idempotency_key`, `aggregate_id`, `type`, `payload::jsonb`, `status`, `attempts`. Polled via `FOR UPDATE SKIP LOCKED` for horizontal scale.
-3. **Idempotency**: All consumers use `processed_events(event_id)` table. Duplicate Kafka deliveries = no-op.
-4. **DLQ**: `conf-events.dlq.v1` topic. Messages failing schema validation after 5 retries land here with alert.
+* Domain
+* Application
+* Infrastructure
+* Presentation
 
-### **Non-Functional Requirements**
+This minimizes coupling while maximizing maintainability and scalability.
 
-| Metric | Target | Validation |
-| --- | --- | --- |
-| **Latency** | p99 < 200ms API, < 2s e2e | k6 load test: 1K RPS |
-| **Throughput** | 10K bookings/min | Kafka: 50 partitions by `room_id` |
-| **Durability** | 99.999% | Jepsen-style chaos: kill Kafka leader mid-commit |
-| **Availability** | 99.95% | Multi-AZ Postgres, K8s HPA + PDB |
-| **Security** | OWASP Top 10 | SAST + DAST in CI, signed commits |
+---
 
-### **Tech Stack**
+# Technology Stack
 
-| Domain | Technology | Rationale |
-| --- | --- | --- |
-| **API** | FastAPI, Pydantic v2, DI via `dependency-injector` | Type safety, OpenAPI, 2.5x faster than Django |
-| **Domain** | Python 3.11, `attrs`, `result` monads | Pure, no ORM leakage. 100% unit testable |
-| **Persistence** | PostgreSQL 16, SQLAlchemy 2.0, `asyncpg` | ACID, JSONB, list/range partitioning |
-| **Messaging** | Kafka 3.7, `aiokafka`, Schema Registry | Durable log, compaction, exactly-once |
-| **LLM** | OpenAI GPT-4o, JSON mode, function-calling | Structured output, < 800ms latency |
-| **Platform** | Kubernetes, Helm, ArgoCD, Terraform | GitOps, zero-downtime deploys |
-| **Observability** | OpenTelemetry, Prometheus, Grafana, Loki | Distributed tracing, exemplars |
-| **Security** | Keycloak/OAuth2, HashiCorp Vault, OPA | Zero-trust, policy-as-code |
+## Backend
 
-### **Repository Structure**
+* Node.js
+* Express.js
+* JavaScript (ES Modules)
+
+## Database
+
+* PostgreSQL
+* Sequelize ORM
+
+## Infrastructure
+
+* Redis
+* Kafka / RabbitMQ (via Transactional Outbox)
+* Docker
+* Docker Compose
+
+## Authentication
+
+* JWT
+* Refresh Tokens
+
+---
+
+# Domain-Driven Design
+
+Each module follows a layered DDD architecture.
+
 ```
-conf-mgmt-llm-platform/
-├── src/confmgmt/
-│   ├── domain/          # Aggregates, VOs, Events. No imports from infra.
-│   ├── application/     # Use cases, ports, DTOs. Transaction boundary.
-│   ├── infrastructure/  # Adapters: Postgres, Kafka, OpenAI, SMTP
-│   ├── api/            # FastAPI, auth, middleware, controllers
-│   └── workers/        # OutboxPublisher, DLQReprocessor
-├── tests/
-│   ├── unit/           # Domain: 0ms, no IO
-│   ├── integration/    # Testcontainers: PG + Kafka
-│   └── e2e/           # LLM → DB → Kafka full flow
-├── infra/
-│   ├── terraform/      # EKS, RDS, MSK
-│   └── helm/          # App charts, PDB, HPA
-└── docs/
-    ├── ARCHITECTURE.md # C4 diagrams
-    └── ADR/           # Why Outbox vs CDC, Why DDD
+Module
+│
+├── application/
+│   ├── commands/
+│   ├── queries/
+│   └── useCases/
+│
+├── domain/
+│   ├── entities/
+│   ├── events/
+│   ├── valueObjects/
+│   ├── repositories/
+│   └── services/
+│
+├── infrastructure/
+│   ├── persistence/
+│   │   ├── models/
+│   │   ├── mappers/
+│   │   └── repositories/
+│   └── integrations/
+│
+└── presentation/
+    ├── controllers/
+    ├── routes/
+    └── dto/
 ```
 
-### **Running Locally**
+---
+
+# Domain Events
+
+Business state changes are represented as immutable domain events.
+
+Examples include:
+
+* TicketCreated
+* TicketReserved
+* TicketReleased
+* TicketPurchased
+* TicketCancelled
+* TicketExpired
+* PaymentInitialized
+* PaymentSucceeded
+* RegistrationCreated
+
+Each event inherits from the shared `DomainEvent` base class, providing:
+
+* Event ID
+* Aggregate ID
+* Event Name
+* Event Version
+* Correlation ID
+* Causation ID
+* Timestamp
+* Immutable Payload
+
+---
+
+# Transactional Outbox Pattern
+
+The system guarantees reliable event publishing by persisting domain events and aggregate state within the same database transaction.
+
+```
+HTTP Request
+      │
+      ▼
+Controller
+      │
+      ▼
+Application Use Case
+      │
+      ▼
+Aggregate
+      │
+      ├── Validate Business Rules
+      ├── Change State
+      └── Record Domain Event
+      │
+      ▼
+Repository
+      │
+      ├── Save Aggregate
+      ├── Save Outbox Events
+      └── Commit Transaction
+      │
+      ▼
+Outbox Publisher
+      │
+      ▼
+Kafka / RabbitMQ
+```
+
+This approach prevents lost events while ensuring consistency between the database and message broker.
+
+---
+
+# Optimistic Concurrency
+
+Aggregates use optimistic concurrency control through a version column.
+
+Typical update:
+
+```
+UPDATE tickets
+SET reserved = ?, version = version + 1
+WHERE id = ?
+AND version = ?;
+```
+
+This prevents concurrent updates from overwriting one another.
+
+---
+
+# Repository Pattern
+
+Repositories encapsulate persistence logic.
+
+Responsibilities include:
+
+* Loading aggregates
+* Saving aggregates
+* Persisting domain events to the outbox
+* Transaction management
+* Optimistic concurrency enforcement
+
+Repositories do **not** contain business rules.
+
+---
+
+# Data Mapper Pattern
+
+Data mappers translate between persistence models and domain models.
+
+```
+Database
+      │
+      ▼
+Mapper
+      │
+      ▼
+Aggregate
+```
+
+This keeps domain entities independent of the ORM.
+
+---
+
+# Aggregate Lifecycle
+
+```
+Command
+      │
+      ▼
+Use Case
+      │
+      ▼
+Repository
+      │
+      ▼
+Aggregate
+      │
+      ├── Validate
+      ├── Change State
+      └── Record Events
+      │
+      ▼
+Repository.save()
+      │
+      ├── Persist Aggregate
+      ├── Persist Outbox
+      └── Commit
+```
+
+---
+
+# Project Principles
+
+* Domain first
+* Rich domain model
+* Persistence ignorance
+* Explicit dependencies
+* Immutable domain events
+* Single Responsibility Principle
+* Dependency Injection
+* High cohesion
+* Low coupling
+
+---
+
+# Running the Project
+
+## Install dependencies
 
 ```bash
-make dev-up     # docker-compose: pg, kafka, schema-registry, grafana
-make migrate    # alembic upgrade head
-make run        # api:8000 + worker in tmux
-make test       # pytest -n auto --cov
-make load-test  # k6 run tests/load/book_slot.js
+npm install
 ```
 
-Health: `GET /health` returns `{"status":"ok","kafka":"up","db":"up","outbox_lag":0}`
+## Configure environment
 
-### **Security & Compliance**
+Create an `.env` file:
 
-1. **AuthN/Z**: JWT with `sub`, `roles`. OPA sidecar for fine-grained `room:write` policies.
-2. **Data**: PII encrypted at rest via `pgcrypto`. Tenant isolation via RLS.
-3. **Audit**: Every command emits `AuditLogCreated` event. Immutable S3 sink.
-4. **Secrets**: No `.env` in repo. Vault injector + IRSA on EKS.
-5. **Supply Chain**: SBOM generated, Grype scan blocks CVSS > 7 in CI.
+```env
+PORT=3000
 
-### **Why This Isn’t a TODO App**
+DATABASE_URL=postgres://user:password@localhost:5432/conference
 
-| Senior Signal | Evidence in Repo |
-| --- | --- |
-| **Concurrency** | `test_concurrent_booking.py` - 100 parallel requests, 1 winner, 0 race conditions |
-| **Resilience** | `test_kafka_outage.py` - Kill broker, bookings still succeed, events drain on recovery |
-| **LLM Safety** | `test_prompt_injection.py` - "Ignore previous instructions" → 422 Validation Error |
-| **Ops** | `dashboards/` Grafana JSON: outbox_lag, dlq_rate, p99 by endpoint |
+JWT_SECRET=your-secret
 
+REDIS_URL=redis://localhost:6379
+```
 
+## Run database migrations
+
+```bash
+npm run migrate
+```
+
+## Start development server
+
+```bash
+npm run dev
+```
+
+## Run tests
+
+```bash
+npm test
+```
+
+---
+
+# Future Enhancements
+
+* Event Sourcing
+* CQRS Read Models
+* Saga Orchestration
+* Elasticsearch
+* Distributed Tracing
+* OpenTelemetry
+* Kubernetes Deployment
+* Multi-tenancy
+* Metrics & Observability
+* API Versioning
+* GraphQL Gateway
+
+---
+
+# License
+
+This project is licensed under the MIT License.
+
+---
+
+# Author
+
+**Rowland Obi**
+
+Senior Backend Engineer specializing in:
+
+* Domain-Driven Design
+* Distributed Systems
+* Payment Infrastructure
+* Event-Driven Architecture
+* PostgreSQL
+* Kafka
+* Redis
+* Node.js
+* Cloud-Native Backend Systems
