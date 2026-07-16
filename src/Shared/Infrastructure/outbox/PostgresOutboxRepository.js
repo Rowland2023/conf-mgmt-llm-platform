@@ -1,53 +1,166 @@
+// src/shared/infrastructure/outbox/PostgresOutboxRepository.js
+
+/**
+ * PostgreSQL implementation of the Transactional Outbox.
+ *
+ * Responsibilities:
+ * - Persist Domain Events atomically with Aggregate changes.
+ * - Fetch unpublished events.
+ * - Lock rows for concurrent workers.
+ * - Mark events as dispatched.
+ * - Increment retry count on failures.
+ */
 export class PostgresOutboxRepository {
-    /**
-     * Persists an extracted domain event cleanly to the relational transactional outbox log.
-     * Must be passed an active transaction client to remain atomic with aggregate changes.
-     * 
-     * @param {Object} domainEvent - Core structured domain event payload instance
-     * @param {Object} trx - Active database transaction client wrapper
-     * @returns {Promise<void>}
-     */
-    async save(domainEvent, trx) {
-        if (!domainEvent) throw new Error("Outbox Error: Domain event reference is empty.");
-        if (!trx) throw new Error("Outbox Error: Shared database transaction context is required for atomic outbox mutations.");
-
-        // Fallback structural parsing if the event lacks a native serialization method
-        const eventData = typeof domainEvent.toJSON === "function" 
-            ? domainEvent.toJSON() 
-            : {
-                id: domainEvent.id,
-                aggregateId: domainEvent.aggregateId,
-                aggregateType: domainEvent.aggregateType || "Notification",
-                type: domainEvent.type || domainEvent.constructor.name,
-                occurredAt: domainEvent.occurredAt,
-                payload: domainEvent.payload || { ...domainEvent }
-              };
-
-        // Extract values from serialized dataset to guarantee immutability safety
-        const eventId = eventData.id;
-        const eventName = eventData.type;
-        const aggregateType = eventData.aggregateType;
-        const aggregateId = eventData.aggregateId;
-        const occurredAt = eventData.occurredAt || new Date();
-        
-        // Deep clone or sanitize the payload reference if needed without mutating frozen entities
-        const cleanPayload = { ...eventData.payload };
-
-        await trx.query(
-            `INSERT INTO outbox_events (
-                id, event_name, aggregate_type, aggregate_id, payload, status, occurred_at, processed_at, retry_count
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
-            [
-                eventId,
-                eventName,
-                aggregateType,
-                aggregateId,
-                JSON.stringify(cleanPayload),
-                "pending", // New events start out pending processing
-                occurredAt,
-                null,      // Not yet dispatched out to Message Broker (RabbitMQ/Kafka)
-                0          // Initial failure backoff tracking state
-            ]
-        );
+  constructor({ sequelize }) {
+    if (!sequelize) {
+      throw new Error(
+        "PostgresOutboxRepository requires a Sequelize instance."
+      );
     }
+
+    this.sequelize = sequelize;
+  }
+
+  /**
+   * Persist one or more Domain Events.
+   *
+   * Must be called using the SAME transaction that
+   * persists the Aggregate.
+   *
+   * @param {DomainEvent[]} events
+   * @param {Transaction} trx
+   */
+  async save(events, trx) {
+    if (!Array.isArray(events)) {
+      events = [events];
+    }
+
+    if (!trx) {
+      throw new Error(
+        "Outbox save requires an active database transaction."
+      );
+    }
+
+    for (const event of events) {
+      const metadata = event.metadata;
+
+      await this.sequelize.query(
+        `
+        INSERT INTO outbox_events (
+            id,
+            event_name,
+            aggregate_id,
+            event_version,
+            correlation_id,
+            causation_id,
+            payload,
+            status,
+            retry_count,
+            occurred_at
+        )
+        VALUES (
+            :id,
+            :eventName,
+            :aggregateId,
+            :eventVersion,
+            :correlationId,
+            :causationId,
+            CAST(:payload AS jsonb),
+            'PENDING',
+            0,
+            :occurredAt
+        )
+        `,
+        {
+          replacements: {
+            id: metadata.eventId,
+            eventName: metadata.eventName,
+            aggregateId: metadata.aggregateId,
+            eventVersion: metadata.eventVersion,
+            correlationId: metadata.correlationId,
+            causationId: metadata.causationId,
+            occurredAt: metadata.occurredAt,
+            payload: JSON.stringify(event.payload)
+          },
+          transaction: trx
+        }
+      );
+    }
+  }
+
+  /**
+   * Fetch and lock pending events.
+   *
+   * Uses SKIP LOCKED so multiple workers
+   * can run safely.
+   */
+  async fetchAndLockPending(batchSize, maxRetries) {
+    const [rows] = await this.sequelize.query(
+      `
+      UPDATE outbox_events
+         SET status = 'PROCESSING'
+       WHERE id IN (
+
+            SELECT id
+              FROM outbox_events
+             WHERE status = 'PENDING'
+               AND retry_count < :maxRetries
+          ORDER BY occurred_at
+             LIMIT :batchSize
+             FOR UPDATE SKIP LOCKED
+
+       )
+
+      RETURNING *;
+      `,
+      {
+        replacements: {
+          batchSize,
+          maxRetries
+        }
+      }
+    );
+
+    return rows;
+  }
+
+  /**
+   * Mark an event as successfully dispatched.
+   */
+  async markAsDispatched(id) {
+    await this.sequelize.query(
+      `
+      UPDATE outbox_events
+         SET
+            status='DISPATCHED',
+            processed_at=NOW()
+       WHERE id=:id
+      `,
+      {
+        replacements: { id }
+      }
+    );
+  }
+
+  /**
+   * Increment retry count after failure.
+   */
+  async incrementRetry(id, errorMessage) {
+    await this.sequelize.query(
+      `
+      UPDATE outbox_events
+         SET
+            retry_count = retry_count + 1,
+            status='PENDING',
+            last_error=:error
+       WHERE id=:id
+      `,
+      {
+        replacements: {
+          id,
+          error: errorMessage
+        }
+      }
+    );
+  }
 }

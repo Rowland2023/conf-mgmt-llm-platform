@@ -1,149 +1,154 @@
+// src/shared/infrastructure/outbox/OutboxWorker.js
+
 /**
- * Generic Transactional Outbox Worker Core Architecture.
- * Decouples database record states from network transport latency.
+ * Transactional Outbox Worker.
+ *
+ * Responsibilities:
+ * - Poll unpublished outbox records.
+ * - Dispatch events through an OutboxDispatcher.
+ * - Mark successful events.
+ * - Retry failed events.
+ *
+ * The worker knows nothing about Kafka,
+ * RabbitMQ or PostgreSQL internals.
  */
 export class OutboxWorker {
-    constructor({
-        outboxRepository,
-        dispatcher,
-        logger = console,
-        batchSize = 100,
-        concurrencyLimit = 10,
-        maxRetries = 5
-    }) {
-        if (!outboxRepository) throw new Error("OutboxWorker requires an outboxRepository.");
-        if (!dispatcher) throw new Error("OutboxWorker requires a dispatcher.");
-
-        this.outboxRepository = outboxRepository;
-        this.dispatcher = dispatcher;
-        this.logger = logger;
-        this.batchSize = batchSize;
-        this.concurrencyLimit = concurrencyLimit;
-        this.maxRetries = maxRetries;
-        
-        this.timer = null;
-        this.isProcessing = false;
-        this.shouldStop = false;
+  constructor({
+    outboxRepository,
+    dispatcher,
+    logger = console,
+    pollIntervalMs = 3000,
+    batchSize = 100,
+    maxRetries = 5
+  }) {
+    if (!outboxRepository) {
+      throw new Error(
+        "OutboxWorker requires an outboxRepository."
+      );
     }
 
-    /**
-     * Process one batch of pending events with bounded internal concurrency execution.
-     * @returns {Promise<{ processed: number, failed: number }>} Batch processing yield metrics
-     */
-    async process() {
-        if (this.isProcessing) return { processed: 0, failed: 0 };
-        this.isProcessing = true;
-
-        try {
-            // 1. Fetch and immediately transition row status to an 'IN_PROGRESS' lock state.
-            //    This keeps database transactions short (<50ms) and frees up row locks before network I/O.
-            const events = await this.outboxRepository.fetchAndLockPending(this.batchSize, this.maxRetries);
-
-            if (!events || !events.length) {
-                return { processed: 0, failed: 0 };
-            }
-
-            let failedCount = 0;
-
-            // 2. Safely iterate through chunks knowing these rows are locked to this instance id
-            for (let i = 0; i < events.length; i += this.concurrencyLimit) {
-                if (this.shouldStop) break;
-                
-                const chunk = events.slice(i, i + this.concurrencyLimit);
-                const results = await Promise.all(chunk.map(event => this.#processSingleEvent(event)));
-                
-                failedCount += results.filter(success => !success).length;
-            }
-
-            return { 
-                processed: events.length, 
-                failed: failedCount 
-            };
-        } finally {
-            this.isProcessing = false;
-        }
+    if (!dispatcher) {
+      throw new Error(
+        "OutboxWorker requires a dispatcher."
+      );
     }
 
-    /**
-     * @private
-     * @returns {Promise<boolean>} True if dispatched successfully, false if trapped by error boundary
-     */
-    async #processSingleEvent(event) {
-        try {
-            await this.dispatcher.dispatch(event);
-            await this.outboxRepository.markAsDispatched(event.id);
+    this.outboxRepository = outboxRepository;
+    this.dispatcher = dispatcher;
 
-            this.logger.info?.(`Outbox event ${event.id} dispatched successfully.`, {
-                eventType: event.eventName,
-                aggregateId: event.aggregateId
-            });
-            return true;
-        } catch (error) {
-            this.logger.error?.(`Outbox dispatch failed for event ${event.id}`, {
-                error: error.message,
-                eventType: event.eventName
-            });
+    this.logger = logger;
 
-            try {
-                // Release our custom state-lock and increment standard exponential backoff counters
-                await this.outboxRepository.incrementRetry(event.id, error.message);
-            } catch (repoError) {
-                this.logger.error?.(`Critical Outbox State Lock Leak: Failed retry-state increment on event ${event.id}`, repoError);
-            }
-            return false;
-        }
+    this.pollIntervalMs = pollIntervalMs;
+    this.batchSize = batchSize;
+    this.maxRetries = maxRetries;
+
+    this.running = false;
+    this.timer = null;
+  }
+
+  /**
+   * Starts polling.
+   */
+  start() {
+    if (this.running) {
+      return;
     }
 
-    /**
-     * Starts the non-overlapping execution scheduling loop.
-     */
-    start(intervalMs = 5000) {
-        if (this.timer || this.shouldStop) return;
-        this.shouldStop = false;
+    this.running = true;
 
-        this.logger.info?.(`OutboxWorker daemon started (poll interval: ${intervalMs}ms)`);
+    this.logger.info?.(
+      "[OutboxWorker] started."
+    );
 
-        const loop = async () => {
-            if (this.shouldStop) return;
+    this.#schedule();
+  }
 
-            let forceImmediateNext = false;
+  /**
+   * Stops polling gracefully.
+   */
+  async stop() {
+    this.running = false;
 
-            try {
-                const { processed, failed } = await this.process();
-                
-                // Backpressure Check: Only request an immediate next batch if we maxed out the batch capacity 
-                // AND we aren't spinning our wheels on a wall of failing downstream systems.
-                if (processed === this.batchSize && failed < (this.batchSize * 0.5)) {
-                    forceImmediateNext = true;
-                }
-            } catch (error) {
-                this.logger.error?.("Unexpected OutboxWorker processing cycle crash.", error);
-            }
-
-            if (forceImmediateNext && !this.shouldStop) {
-                setImmediate(loop);
-            } else {
-                this.timer = setTimeout(loop, intervalMs);
-            }
-        };
-
-        this.timer = setTimeout(loop, intervalMs);
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
     }
 
-    /**
-     * Gracefully terminates polling operations.
-     */
-    async stop() {
-        this.shouldStop = true;
-        if (this.timer) {
-            clearTimeout(this.timer);
-            this.timer = null;
-        }
+    this.logger.info?.(
+      "[OutboxWorker] stopped."
+    );
+  }
 
-        while (this.isProcessing) {
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-
-        this.logger.info?.("OutboxWorker stopped cleanly.");
+  /**
+   * Poll loop.
+   */
+  async #schedule() {
+    if (!this.running) {
+      return;
     }
+
+    try {
+      await this.#processBatch();
+    } catch (error) {
+      this.logger.error?.(
+        "[OutboxWorker]",
+        error
+      );
+    }
+
+    this.timer = setTimeout(
+      () => this.#schedule(),
+      this.pollIntervalMs
+    );
+  }
+
+  /**
+   * Process one batch.
+   */
+  async #processBatch() {
+    const events =
+      await this.outboxRepository.fetchAndLockPending(
+        this.batchSize,
+        this.maxRetries
+      );
+
+    if (!events.length) {
+      return;
+    }
+
+    this.logger.info?.(
+      `[OutboxWorker] Processing ${events.length} event(s).`
+    );
+
+    for (const event of events) {
+      await this.#dispatch(event);
+    }
+  }
+
+  /**
+   * Dispatch one event.
+   */
+  async #dispatch(event) {
+    try {
+      await this.dispatcher.dispatch(event);
+
+      await this.outboxRepository.markAsDispatched(
+        event.id
+      );
+
+      this.logger.info?.(
+        `[OutboxWorker] ${event.eventName} dispatched.`
+      );
+    } catch (error) {
+      this.logger.error?.(
+        `[OutboxWorker] Failed ${event.eventName}`,
+        error
+      );
+
+      await this.outboxRepository.incrementRetry(
+        event.id,
+        error.message
+      );
+    }
+  }
 }
