@@ -1,4 +1,5 @@
 # Conference Management System API
+Conference Management System API is a production-ready backend platform for managing conferences, ticketing, registrations, payments, and notifications. It demonstrates how to build modular, event-driven business applications using Domain-Driven Design, Clean Architecture, and reliable messaging patterns suitable for production systems.
 
 A production-ready, Domain-Driven Design (DDD) conference management platform built with **Node.js**, **Express.js**, **PostgreSQL**, and **Sequelize**. The system is designed around modular architecture, event-driven principles, and enterprise patterns including **Transactional Outbox**, **Optimistic Concurrency Control**, and **CQRS-inspired application services**.
 
